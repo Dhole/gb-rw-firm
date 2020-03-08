@@ -8,21 +8,16 @@ extern crate embedded_hal;
 extern crate panic_halt; // panic handler
 
 // use core::fmt::Write;
-use core::fmt::Write;
+// use core::fmt::Write;
 use cortex_m;
 use cortex_m_rt::entry;
 use stm32f4xx_hal as hal;
 
-use hal::{nb::block, prelude::*, serial::Serial, stm32};
+// use embedded_hal::fmt;
+use hal::{nb::block, prelude::*, stm32};
 
-// https://docs.rs/embedded-hal/0.2.3/src/embedded_hal/fmt.rs.html#1-17
-// fn write_str<Word, Error>(&mut hal::serial::Write<Word, Error=Error>, s: &str) -> Result {
-//     let _ = s.as_bytes()
-//         .into_iter()
-//         .map(|c| block!(self.write(Word::from(*c))))
-//         .last();
-//     Ok(())
-// }
+use gb_rw_firm::serial::Serial;
+use gb_rw_firm::serial::Write as _;
 
 #[entry]
 fn main() -> ! {
@@ -44,8 +39,8 @@ fn main() -> ! {
 
     // Set up the usart device. Taks ownership over the USART register and tx/rx pins. The rest of
     // the registers are used to enable and configure the device.
-    let (mut serial_tx, mut serial_rx) = hal::serial::Serial::usart2(
-        // let mut serial = hal::serial::Serial::usart2(
+
+    let (tx, rx) = hal::serial::Serial::usart2(
         dp.USART2,
         (tx, rx),
         hal::serial::config::Config::default().baudrate(921600.bps()),
@@ -54,11 +49,9 @@ fn main() -> ! {
     .unwrap()
     .split();
 
-    // serial_tx.write_str("\nHELLO\n").ok();
-    //serial.write(b'A').ok();
-    // serial.write_str("\nHELLO\n").ok();
-    // serial_tx.bwrite_all(b"\nHELLO\n").ok();
-    serial_tx.bwrite_all(b"AAA").ok();
+    let mut serial = Serial::new(rx, tx);
+
+    serial.write_all(b"\nHELLO\n").ok();
 
     // Create a delay abstraction based on SysTick
     let mut delay = hal::delay::Delay::new(cp.SYST, clocks);

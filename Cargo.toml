@@ -1,5 +1,5 @@
 [package]
-name = "gb-rw-stm32f411-rs"
+name = "gb-rw-firm"
 version = "0.1.0"
 authors = ["Dhole <dhole@riseup.net>"]
 edition = "2018"
@@ -7,9 +7,13 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+nb = "0.1.1"
 panic-semihosting = "0.5.3"
 panic-halt = "0.2.0"
 cortex-m = ">=0.5.8,<0.7"
 cortex-m-rt = "0.6.10"
 embedded-hal = ">=0.2.3"
+# embedded-hal = { path = "/home/dev/git/embedded-hal" }
 stm32f4xx-hal = { version = ">=0.6.0", features = [ "rt", "stm32f411" ] }
+# stm32f4xx-hal = { path = "/home/dev/git/stm32f4xx-hal", features = [ "rt", "stm32f411" ] }
+stm32f4 = "0.10.0"
