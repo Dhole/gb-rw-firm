@@ -16,6 +16,7 @@ use stm32f4xx_hal as hal;
 // use embedded_hal::fmt;
 use hal::{nb::block, prelude::*, stm32};
 
+use gb_rw_firm::gpio::GpioPortC;
 use gb_rw_firm::serial::Serial;
 use gb_rw_firm::serial::Write as _;
 
@@ -52,6 +53,10 @@ fn main() -> ! {
     let mut serial = Serial::new(rx, tx);
 
     serial.write_all(b"\nHELLO\n").ok();
+
+    let gpio_c = GpioPortC::take(dp.GPIOC, 0b0011_1111_1111_1111);
+    let gpio_c = gpio_c.into_push_pull_output();
+    gpio_c.write(0xffff).ok();
 
     // Create a delay abstraction based on SysTick
     let mut delay = hal::delay::Delay::new(cp.SYST, clocks);
