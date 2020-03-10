@@ -1,31 +1,7 @@
 use core::convert::Infallible;
 use core::marker::PhantomData;
 use stm32f4::stm32f411 as stm32;
-
-use stm32::GPIOC;
-
-pub struct GpioPortC<MODE> {
-    gpio: GPIOC,
-    mask: u16,
-    reg_vals: RegValues,
-    _mode: PhantomData<MODE>,
-}
-
-impl<MODE> GpioPortC<Output<MODE>> {
-    pub fn write(&self, word: u16) -> Result<(), Infallible> {
-        Ok(unsafe {
-            (*GPIOC::ptr())
-                .odr
-                .modify(|r, w| w.bits((r.bits() & 0xffff0000) | word as u32))
-        })
-    }
-}
-
-impl<MODE> GpioPortC<Input<MODE>> {
-    pub fn read(&self) -> Result<u16, Infallible> {
-        Ok(unsafe { ((*GPIOC::ptr()).idr.read().bits() & 0x0000ffff) as u16 })
-    }
-}
+use stm32f4xx_hal as hal;
 
 /// No configured mode (type state)
 pub struct None;
@@ -55,15 +31,6 @@ pub struct Output<MODE> {
 /// Push pull output (type state)
 pub struct PushPull;
 
-// fn loop_mask(mask: u16, f: fn(u32)) {
-//     for i in 0..16 {
-//         if 1 << i & mask == 0 {
-//             continue;
-//         }
-//         f(i);
-//     }
-// }
-
 struct RegValues {
     clr: u32,
     v00: u32,
@@ -72,132 +39,197 @@ struct RegValues {
     // v11: u32,
 }
 
+struct RegSnapshot {
+    pupdr: u32,
+    moder: u32,
+    otyper: u16,
+}
+
 impl RegValues {
     fn new(mask: u16) -> Self {
+        let iter = (0..16).filter(|i| mask & 1u16 << i != 0u16);
         Self {
-            clr: !(0..16).map(|i| 0b11 << 2 * i).sum::<u32>(),
-            v00: (0..16).map(|i| 0b00 << 2 * i).sum(),
-            v01: (0..16).map(|i| 0b01 << 2 * i).sum(),
-            v10: (0..16).map(|i| 0b10 << 2 * i).sum(),
+            clr: !iter.clone().map(|i| 0b11 << (2 * i)).sum::<u32>(),
+            v00: iter.clone().map(|i| 0b00 << (2 * i)).sum(),
+            v01: iter.clone().map(|i| 0b01 << (2 * i)).sum(),
+            v10: iter.map(|i| 0b10 << (2 * i)).sum(),
             // v11: (0..16).map(|i| 0b11 << 2 * i).sum(),
         }
     }
 }
 
-impl GpioPortC<None> {
-    pub fn take(gpio: GPIOC, mask: u16) -> GpioPortC<Input<Floating>> {
-        GpioPortC {
-            gpio,
-            mask,
-            reg_vals: RegValues::new(mask),
-            _mode: PhantomData,
+macro_rules! gpio {
+    ($GPIOX:ident, $gpiox:ident, $GpioPort:ident, $px:ident) => {
+        use hal::gpio::$gpiox;
+        use stm32::$GPIOX;
+
+        pub struct $GpioPort<MODE> {
+            gpio_parts: $gpiox::Parts,
+            reg_snap: RegSnapshot,
+            mask: u16,
+            reg_vals: RegValues,
+            _mode: PhantomData<MODE>,
         }
-    }
+
+        impl<MODE> $GpioPort<Output<MODE>> {
+            pub fn write(&self, word: u16) -> Result<(), Infallible> {
+                Ok(unsafe {
+                    (*$GPIOX::ptr())
+                        .odr
+                        .modify(|r, w| w.bits((r.bits() & 0xffff0000) | word as u32))
+                })
+            }
+        }
+
+        impl<MODE> $GpioPort<Input<MODE>> {
+            pub fn read(&self) -> Result<u16, Infallible> {
+                Ok(unsafe { ((*$GPIOX::ptr()).idr.read().bits() & 0x0000ffff) as u16 })
+            }
+        }
+
+        impl $GpioPort<None> {
+            pub fn take(gpio_parts: $gpiox::Parts, mask: u16) -> $GpioPort<Input<Floating>> {
+                let reg_snap = RegSnapshot {
+                    pupdr: unsafe { (*$GPIOX::ptr()).pupdr.read().bits() },
+                    moder: unsafe { (*$GPIOX::ptr()).moder.read().bits() },
+                    otyper: unsafe { ((*$GPIOX::ptr()).otyper.read().bits() & 0x0000ffff) as u16 },
+                };
+                $GpioPort {
+                    gpio_parts,
+                    reg_snap,
+                    mask,
+                    reg_vals: RegValues::new(mask),
+                    _mode: PhantomData,
+                }
+            }
+        }
+
+        impl<MODE> $GpioPort<MODE> {
+            pub fn release(self) -> $gpiox::Parts {
+                // Restore all the GPIOs to the they where before taking the port
+                unsafe {
+                    &(*$GPIOX::ptr())
+                        .pupdr
+                        .write(|w| w.bits(self.reg_snap.pupdr));
+                    &(*$GPIOX::ptr())
+                        .moder
+                        .write(|w| w.bits(self.reg_snap.moder));
+                    &(*$GPIOX::ptr()).otyper.modify(|r, w| {
+                        w.bits((r.bits() & 0xffff0000) | self.reg_snap.otyper as u32)
+                    });
+                };
+                self.gpio_parts
+            }
+
+            /// Configures the port to operate as a floating input port
+            pub fn into_floating_input(self) -> $GpioPort<Input<Floating>> {
+                unsafe {
+                    &(*$GPIOX::ptr())
+                        .pupdr
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
+                    &(*$GPIOX::ptr())
+                        .moder
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
+                };
+
+                $GpioPort {
+                    gpio_parts: self.gpio_parts,
+                    reg_snap: self.reg_snap,
+                    mask: self.mask,
+                    reg_vals: self.reg_vals,
+                    _mode: PhantomData,
+                }
+            }
+
+            /// Configures the port to operate as a pulled down input port
+            pub fn into_pull_down_input(self) -> $GpioPort<Input<PullDown>> {
+                unsafe {
+                    &(*$GPIOX::ptr())
+                        .pupdr
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v10));
+                    &(*$GPIOX::ptr())
+                        .moder
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
+                };
+
+                $GpioPort {
+                    gpio_parts: self.gpio_parts,
+                    reg_snap: self.reg_snap,
+                    mask: self.mask,
+                    reg_vals: self.reg_vals,
+                    _mode: PhantomData,
+                }
+            }
+
+            /// Configures the port to operate as a pulled up input port
+            pub fn into_pull_up_input(self) -> $GpioPort<Input<PullUp>> {
+                unsafe {
+                    &(*$GPIOX::ptr())
+                        .pupdr
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v01));
+                    &(*$GPIOX::ptr())
+                        .moder
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
+                };
+
+                $GpioPort {
+                    gpio_parts: self.gpio_parts,
+                    reg_snap: self.reg_snap,
+                    mask: self.mask,
+                    reg_vals: self.reg_vals,
+                    _mode: PhantomData,
+                }
+            }
+
+            /// Configures the port to operate as an open drain output port
+            pub fn into_open_drain_output(self) -> $GpioPort<Output<OpenDrain>> {
+                unsafe {
+                    &(*$GPIOX::ptr())
+                        .pupdr
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
+                    &(*$GPIOX::ptr())
+                        .otyper
+                        .modify(|r, w| w.bits(r.bits() | (self.mask as u32)));
+                    &(*$GPIOX::ptr())
+                        .moder
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v01));
+                };
+
+                $GpioPort {
+                    gpio_parts: self.gpio_parts,
+                    reg_snap: self.reg_snap,
+                    mask: self.mask,
+                    reg_vals: self.reg_vals,
+                    _mode: PhantomData,
+                }
+            }
+
+            /// Configures the port to operate as an push pull output port
+            pub fn into_push_pull_output(self) -> $GpioPort<Output<PushPull>> {
+                unsafe {
+                    &(*$GPIOX::ptr())
+                        .pupdr
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
+                    &(*$GPIOX::ptr())
+                        .otyper
+                        .modify(|r, w| w.bits(r.bits() & !(self.mask as u32)));
+                    &(*$GPIOX::ptr())
+                        .moder
+                        .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v01));
+                };
+
+                $GpioPort {
+                    gpio_parts: self.gpio_parts,
+                    reg_snap: self.reg_snap,
+                    mask: self.mask,
+                    reg_vals: self.reg_vals,
+                    _mode: PhantomData,
+                }
+            }
+        }
+    };
 }
 
-impl<MODE> GpioPortC<MODE> {
-    pub fn release(self) -> GPIOC {
-        self.gpio
-    }
-
-    /// Configures the port to operate as a floating input port
-    pub fn into_floating_input(self) -> GpioPortC<Input<Floating>> {
-        unsafe {
-            &(*GPIOC::ptr())
-                .pupdr
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
-            &(*GPIOC::ptr())
-                .moder
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00))
-        };
-
-        GpioPortC {
-            gpio: self.gpio,
-            mask: self.mask,
-            reg_vals: self.reg_vals,
-            _mode: PhantomData,
-        }
-    }
-
-    /// Configures the port to operate as a pulled down input port
-    pub fn into_pull_down_input(self) -> GpioPortC<Input<PullDown>> {
-        unsafe {
-            &(*GPIOC::ptr())
-                .pupdr
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v10));
-            &(*GPIOC::ptr())
-                .moder
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00))
-        };
-
-        GpioPortC {
-            gpio: self.gpio,
-            mask: self.mask,
-            reg_vals: self.reg_vals,
-            _mode: PhantomData,
-        }
-    }
-
-    /// Configures the port to operate as a pulled up input port
-    pub fn into_pull_up_input(self) -> GpioPortC<Input<PullUp>> {
-        unsafe {
-            &(*GPIOC::ptr())
-                .pupdr
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v01));
-            &(*GPIOC::ptr())
-                .moder
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00))
-        };
-
-        GpioPortC {
-            gpio: self.gpio,
-            mask: self.mask,
-            reg_vals: self.reg_vals,
-            _mode: PhantomData,
-        }
-    }
-
-    /// Configures the port to operate as an open drain output port
-    pub fn into_open_drain_output(self) -> GpioPortC<Output<OpenDrain>> {
-        unsafe {
-            &(*GPIOC::ptr())
-                .pupdr
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
-            &(*GPIOC::ptr())
-                .otyper
-                .modify(|r, w| w.bits(r.bits() | (self.mask as u32)));
-            &(*GPIOC::ptr())
-                .moder
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v01))
-        };
-
-        GpioPortC {
-            gpio: self.gpio,
-            mask: self.mask,
-            reg_vals: self.reg_vals,
-            _mode: PhantomData,
-        }
-    }
-
-    /// Configures the port to operate as an push pull output port
-    pub fn into_push_pull_output(self) -> GpioPortC<Output<PushPull>> {
-        unsafe {
-            &(*GPIOC::ptr())
-                .pupdr
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v00));
-            &(*GPIOC::ptr())
-                .otyper
-                .modify(|r, w| w.bits(r.bits() & !(self.mask as u32)));
-            &(*GPIOC::ptr())
-                .moder
-                .modify(|r, w| w.bits((r.bits() & self.reg_vals.clr) | self.reg_vals.v01))
-        };
-
-        GpioPortC {
-            gpio: self.gpio,
-            mask: self.mask,
-            reg_vals: self.reg_vals,
-            _mode: PhantomData,
-        }
-    }
-}
+gpio!(GPIOA, gpioa, GpioPortA, pa);
+gpio!(GPIOB, gpiob, GpioPortB, pb);
+gpio!(GPIOC, gpioc, GpioPortC, pc);
