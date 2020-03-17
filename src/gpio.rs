@@ -1,35 +1,8 @@
 use core::convert::Infallible;
 use core::marker::PhantomData;
+use hal::gpio::{Floating, Input, OpenDrain, Output, PullDown, PullUp, PushPull};
 use stm32f4::stm32f411 as stm32;
 use stm32f4xx_hal as hal;
-
-/// No configured mode (type state)
-pub struct None;
-
-/// Input mode (type state)
-pub struct Input<MODE> {
-    _mode: PhantomData<MODE>,
-}
-
-/// Floating input (type state)
-pub struct Floating;
-
-/// Pulled down input (type state)
-pub struct PullDown;
-
-/// Pulled up input (type state)
-pub struct PullUp;
-
-/// Open drain input or output (type state)
-pub struct OpenDrain;
-
-/// Output mode (type state)
-pub struct Output<MODE> {
-    _mode: PhantomData<MODE>,
-}
-
-/// Push pull output (type state)
-pub struct PushPull;
 
 struct RegValues {
     clr: u32,
@@ -87,7 +60,7 @@ macro_rules! gpio {
             }
         }
 
-        impl $GpioPort<None> {
+        impl $GpioPort<()> {
             pub fn take(gpio_parts: $gpiox::Parts, mask: u16) -> $GpioPort<Input<Floating>> {
                 let reg_snap = RegSnapshot {
                     pupdr: unsafe { (*$GPIOX::ptr()).pupdr.read().bits() },
