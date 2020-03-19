@@ -43,7 +43,8 @@ server_requests! {
     (3, RecvBytes((), OptBufNo, (), OptBufYes)),
     (4, SendRecv((), OptBufYes, (), OptBufYes)),
     (5, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
-    (6, GBMode((), OptBufNo, bool, OptBufNo))
+    (6, GBMode((), OptBufNo, bool, OptBufNo)),
+    (7, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo))
 }
 
 #[entry]
@@ -59,7 +60,7 @@ fn main() -> ! {
     let gpioa = dp.GPIOA.split();
     let mut led = gpioa.pa5.into_push_pull_output();
 
-    let gpioh = dp.GPIOH.split();
+    // let gpioh = dp.GPIOH.split();
 
     // USART2
     // Configure pa2 as a push_pull output, this will be the tx pin
@@ -86,13 +87,13 @@ fn main() -> ! {
     let mut mode = Mode::Resources(Resources {
         gpioc: dp.GPIOC.split(),
         gpiob: dp.GPIOB.split(),
+        gpioa_0: gpioa.pa0,
+        gpioa_1: gpioa.pa1,
         gpioa_6: gpioa.pa6,
         gpioa_7: gpioa.pa7,
         gpioa_8: gpioa.pa8,
         gpioa_9: gpioa.pa9,
         gpioa_10: gpioa.pa10,
-        gpioh_0: gpioh.ph0,
-        gpioh_1: gpioh.ph1,
     });
 
     // let gpioa = GpioPortA::take(dp.GPIOA.split(), 1 << 5);
@@ -213,6 +214,17 @@ fn main() -> ! {
                             req.reply(false, &mut tx_buf).unwrap()
                         }
                     }
+                    ServerRequest::GBWriteWord(req) => {
+                        if let Mode::GB(gb) = mode {
+                            let (addr, word) = req.body;
+                            let mut gb = gb.to_write();
+                            gb.write_byte(addr, word);
+                            mode = Mode::GB(gb.to_read());
+                            req.reply((), &mut tx_buf).unwrap()
+                        } else {
+                            req.reply((), &mut tx_buf).unwrap()
+                        }
+                    }
                 };
                 serial.write_all(&tx_buf[..tx_len]).ok();
                 consts::REQ_HEADER_LEN
@@ -238,34 +250,72 @@ fn add(body: (u8, u8)) -> u8 {
     x + y
 }
 
-use hal::gpio::{gpioa, gpiob, gpioc, gpioh};
+use hal::gpio::{gpioa, gpiob, gpioc};
 use hal::gpio::{Floating, Input, OpenDrain, Output, PullDown, PushPull};
 
 enum Mode {
     Resources(Resources),
-    GB(GB),
+    GB(GB<GBRead>),
 }
 
 struct Resources {
     gpioc: gpioc::Parts,
     gpiob: gpiob::Parts,
+    gpioa_0: gpioa::PA0<Input<Floating>>,
+    gpioa_1: gpioa::PA1<Input<Floating>>,
     gpioa_6: gpioa::PA6<Input<Floating>>,
     gpioa_7: gpioa::PA7<Input<Floating>>,
     gpioa_8: gpioa::PA8<Input<Floating>>,
     gpioa_9: gpioa::PA9<Input<Floating>>,
     gpioa_10: gpioa::PA10<Input<Floating>>,
-    gpioh_0: gpioh::PH0<Input<Floating>>,
-    gpioh_1: gpioh::PH1<Input<Floating>>,
 }
 
-struct GBCart {
+trait GBData {}
+
+struct GBRead(GpioPortB<Input<PullDown>>);
+
+impl GBRead {
+    fn take(gpiob: gpiob::Parts) -> Self {
+        Self(GpioPortB::take(gpiob, 0x00ff).into_pull_down_input())
+    }
+    fn release(self) -> gpiob::Parts {
+        self.0.release()
+    }
+    fn read(&mut self) -> u8 {
+        (self.0.read().unwrap() & 0x00ff) as u8
+    }
+    // fn to_gb_write(self) -> GBWrite {
+    //     GBWrite {
+    //         data: self.data.into_push_pull_output(),
+    //     }
+    // }
+}
+
+impl GBData for GBRead {}
+
+struct GBWrite(GpioPortB<Output<PushPull>>);
+
+impl GBWrite {
+    fn write(&mut self, v: u8) {
+        self.0.write(v as u16).unwrap()
+    }
+    // fn to_gb_read(self) -> GBRead {
+    //     GBRead {
+    //         data: self.data.into_pull_down_input(),
+    //     }
+    // }
+}
+
+impl GBData for GBWrite {}
+
+struct GBCart<D: GBData> {
     addr_0_13: GpioPortC<Output<PushPull>>,
-    addr_14: gpioh::PH0<Output<PushPull>>,
-    addr_15: gpioh::PH1<Output<PushPull>>,
+    addr_14: gpioa::PA0<Output<PushPull>>,
+    addr_15: gpioa::PA1<Output<PushPull>>,
     // addr_0_13: GpioPortC<Output<OpenDrain>>,
     // addr_14: gpioh::PH0<Output<OpenDrain>>,
     // addr_15: gpioh::PH1<Output<OpenDrain>>,
-    data: GpioPortB<Input<PullDown>>,
+    data: D,
     cs: gpioa::PA8<Output<PushPull>>,
     rd: gpioa::PA7<Output<PushPull>>,
     wr: gpioa::PA6<Output<PushPull>>,
@@ -273,16 +323,16 @@ struct GBCart {
     reset: gpioa::PA9<Output<PushPull>>,
 }
 
-impl GBCart {
+impl GBCart<GBRead> {
     fn take(rs: Resources) -> Self {
         let mut s = Self {
             addr_0_13: GpioPortC::take(rs.gpioc, 0b0011_1111_1111_1111).into_push_pull_output(),
-            addr_14: rs.gpioh_0.into_push_pull_output(),
-            addr_15: rs.gpioh_1.into_push_pull_output(),
+            addr_14: rs.gpioa_0.into_push_pull_output(),
+            addr_15: rs.gpioa_1.into_push_pull_output(),
             // addr_0_13: GpioPortC::take(rs.gpioc, 0b0011_1111_1111_1111).into_open_drain_output(),
             // addr_14: rs.gpioh_0.into_open_drain_output(),
             // addr_15: rs.gpioh_1.into_open_drain_output(),
-            data: GpioPortB::take(rs.gpiob, 0x00ff).into_pull_down_input(),
+            data: GBRead::take(rs.gpiob),
             cs: rs.gpioa_8.into_push_pull_output(),
             rd: rs.gpioa_7.into_push_pull_output(),
             wr: rs.gpioa_6.into_push_pull_output(),
@@ -299,15 +349,53 @@ impl GBCart {
         Resources {
             gpioc: self.addr_0_13.release(),
             gpiob: self.data.release(),
+            gpioa_0: self.addr_14.into_floating_input(),
+            gpioa_1: self.addr_15.into_floating_input(),
             gpioa_6: self.wr.into_floating_input(),
             gpioa_7: self.rd.into_floating_input(),
             gpioa_8: self.cs.into_floating_input(),
             gpioa_9: self.reset.into_floating_input(),
             gpioa_10: self.clk.into_floating_input(),
-            gpioh_0: self.addr_14.into_floating_input(),
-            gpioh_1: self.addr_15.into_floating_input(),
         }
     }
+    fn data(&mut self) -> u8 {
+        self.data.read()
+    }
+    fn to_write(self) -> GBCart<GBWrite> {
+        GBCart::<GBWrite> {
+            data: GBWrite(self.data.0.into_push_pull_output()),
+            addr_0_13: self.addr_0_13,
+            addr_14: self.addr_14,
+            addr_15: self.addr_15,
+            cs: self.cs,
+            rd: self.rd,
+            wr: self.wr,
+            clk: self.clk,
+            reset: self.reset,
+        }
+    }
+}
+
+impl GBCart<GBWrite> {
+    fn set_data(&mut self, v: u8) {
+        self.data.write(v)
+    }
+    fn to_read(self) -> GBCart<GBRead> {
+        GBCart::<GBRead> {
+            data: GBRead(self.data.0.into_pull_down_input()),
+            addr_0_13: self.addr_0_13,
+            addr_14: self.addr_14,
+            addr_15: self.addr_15,
+            cs: self.cs,
+            rd: self.rd,
+            wr: self.wr,
+            clk: self.clk,
+            reset: self.reset,
+        }
+    }
+}
+
+impl<D: GBData> GBCart<D> {
     fn set_addr(&mut self, addr: u16) {
         self.addr_0_13.write(addr).unwrap();
         if addr & (1 << 14) != 0 {
@@ -322,9 +410,6 @@ impl GBCart {
             self.addr_15.set_low()
         }
         .unwrap();
-    }
-    fn data(&mut self) -> u8 {
-        (self.data.read().unwrap() & 0x00ff) as u8
     }
     #[rustfmt::skip]
     fn set_pin(&mut self, pin: GBPin, v: bool) {
@@ -346,27 +431,22 @@ enum GBPin {
     RESET,
 }
 
-struct GB {
-    cart: GBCart,
+struct GB<D: GBData> {
+    cart: GBCart<D>,
 }
 
-impl GB {
+impl GB<GBRead> {
     fn read_byte(&mut self, addr: u16) -> u8 {
         self.cart.set_addr(addr);
         self.cart.set_pin(GBPin::CS, true);
-        // wait some nanoseconds
-        // loop_nop!(5);
-        delay(5 * 2);
+        delay(5);
         self.cart.set_pin(GBPin::RD, true);
         // wait ~200ns
-        // loop_nop!(20);
         delay(20);
-        // read data
         let byte = self.cart.data();
 
         self.cart.set_pin(GBPin::RD, false);
         self.cart.set_pin(GBPin::CS, false);
-        // loop_nop!(10);
         delay(10);
 
         return byte;
@@ -374,6 +454,41 @@ impl GB {
     fn read_bytes(&mut self, addr: u16, buf: &mut [u8]) {
         for i in 0..buf.len() {
             buf[i] = self.read_byte(addr + i as u16)
+        }
+    }
+    fn to_write(self) -> GB<GBWrite> {
+        GB {
+            cart: self.cart.to_write(),
+        }
+    }
+}
+
+impl GB<GBWrite> {
+    fn write_byte(&mut self, addr: u16, byte: u8) {
+        // Set address
+        self.cart.set_addr(addr);
+        // wait some nanoseconds
+        delay(5 * 2);
+
+        self.cart.set_pin(GBPin::CS, true);
+        delay(5);
+        self.cart.set_pin(GBPin::WR, true);
+
+        // set data
+        // gpio_data_setup_output();
+        self.cart.set_data(byte);
+        // wait ~200ns
+        delay(20);
+
+        self.cart.set_pin(GBPin::WR, false);
+        delay(5);
+        // gpio_data_setup_input();
+        self.cart.set_pin(GBPin::CS, false);
+        delay(15);
+    }
+    fn to_read(self) -> GB<GBRead> {
+        GB {
+            cart: self.cart.to_read(),
         }
     }
 }
