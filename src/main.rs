@@ -44,7 +44,8 @@ server_requests! {
     (4, SendRecv((), OptBufYes, (), OptBufYes)),
     (5, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
     (6, GBMode((), OptBufNo, bool, OptBufNo)),
-    (7, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo))
+    (7, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
+    (8, GBWrite(u16, OptBufYes, (), OptBufNo))
 }
 
 #[entry]
@@ -74,7 +75,9 @@ fn main() -> ! {
     let (tx, rx) = hal::serial::Serial::usart2(
         dp.USART2,
         (tx, rx),
-        hal::serial::config::Config::default().baudrate(921600.bps()),
+        // hal::serial::config::Config::default().baudrate(921600.bps()),
+        // hal::serial::config::Config::default().baudrate(1152000.bps()),
+        hal::serial::config::Config::default().baudrate(1500000.bps()),
         clocks,
     )
     .unwrap()
@@ -219,6 +222,17 @@ fn main() -> ! {
                             let (addr, word) = req.body;
                             let mut gb = gb.to_write();
                             gb.write_byte(addr, word);
+                            mode = Mode::GB(gb.to_read());
+                            req.reply((), &mut tx_buf).unwrap()
+                        } else {
+                            req.reply((), &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBWrite((req, buf)) => {
+                        if let Mode::GB(gb) = mode {
+                            let addr = req.body;
+                            let mut gb = gb.to_write();
+                            gb.write(addr, buf);
                             mode = Mode::GB(gb.to_read());
                             req.reply((), &mut tx_buf).unwrap()
                         } else {
@@ -468,7 +482,7 @@ impl GB<GBWrite> {
         // Set address
         self.cart.set_addr(addr);
         // wait some nanoseconds
-        delay(5 * 2);
+        delay(5);
 
         self.cart.set_pin(GBPin::CS, true);
         delay(5);
@@ -484,7 +498,12 @@ impl GB<GBWrite> {
         delay(5);
         // gpio_data_setup_input();
         self.cart.set_pin(GBPin::CS, false);
-        delay(15);
+        delay(10);
+    }
+    fn write(&mut self, addr: u16, bytes: &[u8]) {
+        for (i, byte) in bytes.iter().enumerate() {
+            self.write_byte(addr + i as u16, *byte);
+        }
     }
     fn to_read(self) -> GB<GBRead> {
         GB {
