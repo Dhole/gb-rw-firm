@@ -262,16 +262,6 @@ fn main() -> ! {
                             req.reply((), &mut tx_buf).unwrap()
                         }
                     }
-                    // ServerRequest::GBFlashErase(req) => {
-                    //     if let Mode::GB(gb) = mode {
-                    //         let mut gb = gb.to_write();
-                    //         gb.flash_erase();
-                    //         mode = Mode::GB(gb.to_read());
-                    //         req.reply((), &mut tx_buf).unwrap()
-                    //     } else {
-                    //         req.reply((), &mut tx_buf).unwrap()
-                    //     }
-                    // }
                     ServerRequest::GBFlashWrite((req, buf)) => {
                         if let Mode::GB(gb) = mode {
                             let addr = req.body;
@@ -550,6 +540,7 @@ impl GB<GBWrite> {
             self.write_byte(addr + i as u16, *byte);
         }
     }
+    // Returns Self, success, last byte read
     fn flash_write_byte(self, addr: u16, byte: u8) -> (Self, bool, u8) {
         let mut gb = self;
         gb.write_byte(0x0AAA, 0xA9);
@@ -557,58 +548,48 @@ impl GB<GBWrite> {
         gb.write_byte(0x0AAA, 0xA0);
         gb.write_byte(addr, byte);
         let mut gb = gb.to_read();
-        let mut ok = false;
-        let mut b = 0;
+        let (mut ok, mut b1) = (false, 0);
+        // Poll Q6 to detect completion of the Flash Auto Program Algorithm
         for _ in 0..50 {
             delay(10);
             let b0 = gb.read_byte(addr);
-            let b1 = gb.read_byte(addr);
-            b = b1;
+            delay(5);
+            b1 = gb.read_byte(addr);
+            // Q6 toggles during Flash Auto Program Algorithm
+            // Q5 = 1 indicates failure
             if b0 & (1 << 6) == b1 & (1 << 6) {
-                // if b == byte {
                 ok = true;
                 break;
             } else if b0 & (1 << 5) != 0 {
                 break;
             }
         }
-        (gb.to_write(), ok, b)
+        (gb.to_write(), ok, b1)
     }
     fn flash_write(self, addr: u16, bytes: &[u8]) -> (Self, Option<(u16, u8)>) {
-        // For some reason, the first byte may not be written, so we force the
-        // first write to do nothing.
         let mut gb = self;
         let mut fail = None;
-        // let (mut gb, mut ok) = self.flash_write_byte(addr, 0xff);
+        const RETRIES: usize = 4;
         for (i, byte) in bytes.iter().enumerate() {
-            // self.flash_write_byte(addr + i as u16, *byte);
-            for _ in 0..4 {
+            for _ in 0..RETRIES {
                 let (_gb, ok, b) = gb.flash_write_byte(addr + i as u16, *byte);
                 gb = _gb;
+                fail = Some((addr + i as u16, b));
                 if !ok {
-                    fail = Some((addr + i as u16, b));
                     break;
                 }
+                // If flash_write_byte reported success but last byte read is different than
+                // exepcted, repeat.
                 if b == *byte {
+                    fail = None;
                     break;
                 }
             }
             if let Some(_) = fail {
                 break;
             }
-            // let (_gb, _ok) = gb.flash_write_byte(addr + i as u16, *byte);
-            // gb = _gb;
-            // ok = _ok;
-            //     if ok {
-            //         break;
-            //     }
-            // }
         }
         (gb, fail)
-        // (gb, true)
-    }
-    fn flash_erase(&mut self) {
-        unimplemented!();
     }
     fn to_read(self) -> GB<GBRead> {
         GB {
