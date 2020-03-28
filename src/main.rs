@@ -54,7 +54,9 @@ server_requests! {
     (7, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
     (8, GBWrite(u16, OptBufYes, (), OptBufNo)),
     // (9, GBFlashErase((), OptBufNo, (), OptBufNo)),
-    (10, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo))
+    (10, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
+    (11, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
+    (12, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo))
 }
 
 #[entry]
@@ -271,6 +273,27 @@ fn main() -> ! {
                             req.reply(fail, &mut tx_buf).unwrap()
                         } else {
                             req.reply(None, &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBFlashEraseSector(req) => {
+                        if let Mode::GB(gb) = mode {
+                            let addr = req.body;
+                            let mut gb = gb.to_write();
+                            let (mut gb, ok) = gb.flash_erase_sector(addr);
+                            mode = Mode::GB(gb.to_read());
+                            req.reply(ok, &mut tx_buf).unwrap()
+                        } else {
+                            req.reply(false, &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBFlashInfo(req) => {
+                        if let Mode::GB(gb) = mode {
+                            let mut gb = gb.to_write();
+                            let (mut gb, info) = gb.flash_info();
+                            mode = Mode::GB(gb.to_read());
+                            req.reply(info, &mut tx_buf).unwrap()
+                        } else {
+                            req.reply((0, 0), &mut tx_buf).unwrap()
                         }
                     }
                 };
@@ -565,6 +588,41 @@ impl GB<GBWrite> {
             }
         }
         (gb.to_write(), ok, b1)
+    }
+    fn flash_erase_sector(self, addr: u16) -> (Self, bool) {
+        let mut gb = self;
+        gb.write_byte(0x0AAA, 0xA9);
+        gb.write_byte(0x0555, 0x56);
+        gb.write_byte(0x0AAA, 0x80);
+        gb.write_byte(0x0AAA, 0xA9);
+        gb.write_byte(0x0555, 0x56);
+        gb.write_byte(addr, 0x30);
+        let mut ok = false;
+        let mut gb = gb.to_read();
+        for _ in 0..800 {
+            delay(1000);
+            let b = gb.read_byte(addr);
+            if b == 0xff {
+                ok = true;
+                break;
+            }
+        }
+        (gb.to_write(), ok)
+    }
+    fn flash_info(self) -> (Self, (u8, u8)) {
+        let mut gb = self;
+        gb.write_byte(0x0AAA, 0xA9);
+        gb.write_byte(0x0555, 0x56);
+        gb.write_byte(0x0AAA, 0x90);
+        gb.write_byte(0x0AAA, 0xA9);
+        gb.write_byte(0x0555, 0x56);
+        gb.write_byte(0x0AAA, 0x90);
+        let mut gb = gb.to_read();
+        let manufacturer_id = gb.read_byte(0x0000);
+        let device_id = gb.read_byte(0x0002);
+        let mut gb = gb.to_write();
+        gb.write_byte(0x0000, 0xFF); // reset
+        (gb, (manufacturer_id, device_id))
     }
     fn flash_write(self, addr: u16, bytes: &[u8]) -> (Self, Option<(u16, u8)>) {
         let mut gb = self;
