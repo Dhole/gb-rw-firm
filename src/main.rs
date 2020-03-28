@@ -99,7 +99,7 @@ fn main() -> ! {
     serial.write_all(b"\nHELLO\n").ok();
 
     let mut mode = Mode::GB(GB {
-        cart: GBCart::take(Resources {
+        cart: Some(GBCart::take(Resources {
             gpioc: dp.GPIOC.split(),
             gpiob: dp.GPIOB.split(),
             gpioa_0: gpioa.pa0,
@@ -109,7 +109,7 @@ fn main() -> ! {
             gpioa_8: gpioa.pa8,
             gpioa_9: gpioa.pa9,
             gpioa_10: gpioa.pa10,
-        }),
+        })),
     });
 
     // let gpioa = GpioPortA::take(dp.GPIOA.split(), 1 << 5);
@@ -223,13 +223,13 @@ fn main() -> ! {
                     }
                     ServerRequest::Mode(req) => {
                         let rs = match mode {
-                            Mode::GB(gb) => gb.cart.release(),
+                            Mode::GB(gb) => gb.cart.unwrap().release(),
                             Mode::GBA(gba) => gba.cart.release(),
                         };
                         match req.body {
                             ReqMode::GB => {
                                 let gb = GB {
-                                    cart: GBCart::take(rs),
+                                    cart: Some(GBCart::take(rs)),
                                 };
                                 mode = Mode::GB(gb);
                             }
@@ -243,54 +243,44 @@ fn main() -> ! {
                         req.reply(false, &mut tx_buf).unwrap()
                     }
                     ServerRequest::GBWriteWord(req) => {
-                        if let Mode::GB(gb) = mode {
+                        if let Mode::GB(ref mut gb) = mode {
                             let (addr, word) = req.body;
-                            let mut gb = gb.to_write();
                             gb.write_byte(addr, word);
-                            mode = Mode::GB(gb.to_read());
                             req.reply((), &mut tx_buf).unwrap()
                         } else {
                             req.reply((), &mut tx_buf).unwrap()
                         }
                     }
                     ServerRequest::GBWrite((req, buf)) => {
-                        if let Mode::GB(gb) = mode {
+                        if let Mode::GB(ref mut gb) = mode {
                             let addr = req.body;
-                            let mut gb = gb.to_write();
                             gb.write(addr, buf);
-                            mode = Mode::GB(gb.to_read());
                             req.reply((), &mut tx_buf).unwrap()
                         } else {
                             req.reply((), &mut tx_buf).unwrap()
                         }
                     }
                     ServerRequest::GBFlashWrite((req, buf)) => {
-                        if let Mode::GB(gb) = mode {
+                        if let Mode::GB(ref mut gb) = mode {
                             let addr = req.body;
-                            let mut gb = gb.to_write();
-                            let (mut gb, fail) = gb.flash_write(addr, buf);
-                            mode = Mode::GB(gb.to_read());
+                            let fail = gb.flash_write(addr, buf);
                             req.reply(fail, &mut tx_buf).unwrap()
                         } else {
                             req.reply(None, &mut tx_buf).unwrap()
                         }
                     }
                     ServerRequest::GBFlashEraseSector(req) => {
-                        if let Mode::GB(gb) = mode {
+                        if let Mode::GB(ref mut gb) = mode {
                             let addr = req.body;
-                            let mut gb = gb.to_write();
-                            let (mut gb, ok) = gb.flash_erase_sector(addr);
-                            mode = Mode::GB(gb.to_read());
+                            let ok = gb.flash_erase_sector(addr);
                             req.reply(ok, &mut tx_buf).unwrap()
                         } else {
                             req.reply(false, &mut tx_buf).unwrap()
                         }
                     }
                     ServerRequest::GBFlashInfo(req) => {
-                        if let Mode::GB(gb) = mode {
-                            let mut gb = gb.to_write();
-                            let (mut gb, info) = gb.flash_info();
-                            mode = Mode::GB(gb.to_read());
+                        if let Mode::GB(ref mut gb) = mode {
+                            let info = gb.flash_info();
                             req.reply(info, &mut tx_buf).unwrap()
                         } else {
                             req.reply((0, 0), &mut tx_buf).unwrap()
@@ -326,7 +316,7 @@ use hal::gpio::{gpioa, gpiob, gpioc};
 use hal::gpio::{Floating, Input, OpenDrain, Output, PullDown, PushPull};
 
 enum Mode {
-    GB(GB<GBRead>),
+    GB(GB),
     GBA(GBA<GBARead>),
 }
 
@@ -503,22 +493,23 @@ enum GBPin {
     RESET,
 }
 
-struct GB<D: GBData> {
-    cart: GBCart<D>,
+struct GB {
+    cart: Option<GBCart<GBRead>>,
 }
 
-impl GB<GBRead> {
+impl GB {
     fn read_byte(&mut self, addr: u16) -> u8 {
-        self.cart.set_addr(addr);
-        self.cart.set_pin(GBPin::CS, true);
+        let mut cart = self.cart.as_mut().unwrap();
+        cart.set_addr(addr);
+        cart.set_pin(GBPin::CS, true);
         delay(5);
-        self.cart.set_pin(GBPin::RD, true);
+        cart.set_pin(GBPin::RD, true);
         // wait ~200ns
         delay(20);
-        let byte = self.cart.data();
+        let byte = cart.data();
 
-        self.cart.set_pin(GBPin::RD, false);
-        self.cart.set_pin(GBPin::CS, false);
+        cart.set_pin(GBPin::RD, false);
+        cart.set_pin(GBPin::CS, false);
         delay(10);
 
         return byte;
@@ -528,35 +519,37 @@ impl GB<GBRead> {
             buf[i] = self.read_byte(addr + i as u16)
         }
     }
-    fn to_write(self) -> GB<GBWrite> {
-        GB {
-            cart: self.cart.to_write(),
-        }
-    }
+    // fn to_write(self) -> GB<GBWrite> {
+    //     GB {
+    //         cart: self.cart.to_write(),
+    //     }
+    // }
 }
 
-impl GB<GBWrite> {
+impl GB {
     fn write_byte(&mut self, addr: u16, byte: u8) {
+        let mut cart = self.cart.take().unwrap().to_write();
         // Set address
-        self.cart.set_addr(addr);
+        cart.set_addr(addr);
         // wait some nanoseconds
         delay(5);
 
-        self.cart.set_pin(GBPin::CS, true);
+        cart.set_pin(GBPin::CS, true);
         delay(5);
-        self.cart.set_pin(GBPin::WR, true);
+        cart.set_pin(GBPin::WR, true);
 
         // set data
         // gpio_data_setup_output();
-        self.cart.set_data(byte);
+        cart.set_data(byte);
         // wait ~200ns
         delay(20);
 
-        self.cart.set_pin(GBPin::WR, false);
+        cart.set_pin(GBPin::WR, false);
         // delay(5);
         // gpio_data_setup_input();
-        self.cart.set_pin(GBPin::CS, false);
-        delay(25);
+        cart.set_pin(GBPin::CS, false);
+        delay(10);
+        self.cart = Some(cart.to_read());
     }
     fn write(&mut self, addr: u16, bytes: &[u8]) {
         for (i, byte) in bytes.iter().enumerate() {
@@ -564,20 +557,18 @@ impl GB<GBWrite> {
         }
     }
     // Returns Self, success, last byte read
-    fn flash_write_byte(self, addr: u16, byte: u8) -> (Self, bool, u8) {
-        let mut gb = self;
-        gb.write_byte(0x0AAA, 0xA9);
-        gb.write_byte(0x0555, 0x56);
-        gb.write_byte(0x0AAA, 0xA0);
-        gb.write_byte(addr, byte);
-        let mut gb = gb.to_read();
+    fn flash_write_byte(&mut self, addr: u16, byte: u8) -> (bool, u8) {
+        self.write_byte(0x0AAA, 0xA9);
+        self.write_byte(0x0555, 0x56);
+        self.write_byte(0x0AAA, 0xA0);
+        self.write_byte(addr, byte);
         let (mut ok, mut b1) = (false, 0);
         // Poll Q6 to detect completion of the Flash Auto Program Algorithm
         for _ in 0..50 {
             delay(10);
-            let b0 = gb.read_byte(addr);
+            let b0 = self.read_byte(addr);
             delay(5);
-            b1 = gb.read_byte(addr);
+            b1 = self.read_byte(addr);
             // Q6 toggles during Flash Auto Program Algorithm
             // Q5 = 1 indicates failure
             if b0 & (1 << 6) == b1 & (1 << 6) {
@@ -587,51 +578,44 @@ impl GB<GBWrite> {
                 break;
             }
         }
-        (gb.to_write(), ok, b1)
+        (ok, b1)
     }
-    fn flash_erase_sector(self, addr: u16) -> (Self, bool) {
-        let mut gb = self;
-        gb.write_byte(0x0AAA, 0xA9);
-        gb.write_byte(0x0555, 0x56);
-        gb.write_byte(0x0AAA, 0x80);
-        gb.write_byte(0x0AAA, 0xA9);
-        gb.write_byte(0x0555, 0x56);
-        gb.write_byte(addr, 0x30);
+    fn flash_erase_sector(&mut self, addr: u16) -> bool {
+        self.write_byte(0x0AAA, 0xA9);
+        self.write_byte(0x0555, 0x56);
+        self.write_byte(0x0AAA, 0x80);
+        self.write_byte(0x0AAA, 0xA9);
+        self.write_byte(0x0555, 0x56);
+        self.write_byte(addr, 0x30);
         let mut ok = false;
-        let mut gb = gb.to_read();
         for _ in 0..800 {
             delay(1000);
-            let b = gb.read_byte(addr);
+            let b = self.read_byte(addr);
             if b == 0xff {
                 ok = true;
                 break;
             }
         }
-        (gb.to_write(), ok)
+        ok
     }
-    fn flash_info(self) -> (Self, (u8, u8)) {
-        let mut gb = self;
-        gb.write_byte(0x0AAA, 0xA9);
-        gb.write_byte(0x0555, 0x56);
-        gb.write_byte(0x0AAA, 0x90);
-        gb.write_byte(0x0AAA, 0xA9);
-        gb.write_byte(0x0555, 0x56);
-        gb.write_byte(0x0AAA, 0x90);
-        let mut gb = gb.to_read();
-        let manufacturer_id = gb.read_byte(0x0000);
-        let device_id = gb.read_byte(0x0002);
-        let mut gb = gb.to_write();
-        gb.write_byte(0x0000, 0xFF); // reset
-        (gb, (manufacturer_id, device_id))
+    fn flash_info(&mut self) -> (u8, u8) {
+        self.write_byte(0x0AAA, 0xA9);
+        self.write_byte(0x0555, 0x56);
+        self.write_byte(0x0AAA, 0x90);
+        self.write_byte(0x0AAA, 0xA9);
+        self.write_byte(0x0555, 0x56);
+        self.write_byte(0x0AAA, 0x90);
+        let manufacturer_id = self.read_byte(0x0000);
+        let device_id = self.read_byte(0x0002);
+        self.write_byte(0x0000, 0xFF); // reset
+        (manufacturer_id, device_id)
     }
-    fn flash_write(self, addr: u16, bytes: &[u8]) -> (Self, Option<(u16, u8)>) {
-        let mut gb = self;
+    fn flash_write(&mut self, addr: u16, bytes: &[u8]) -> Option<(u16, u8)> {
         let mut fail = None;
         const RETRIES: usize = 4;
         for (i, byte) in bytes.iter().enumerate() {
             for _ in 0..RETRIES {
-                let (_gb, ok, b) = gb.flash_write_byte(addr + i as u16, *byte);
-                gb = _gb;
+                let (ok, b) = self.flash_write_byte(addr + i as u16, *byte);
                 fail = Some((addr + i as u16, b));
                 if !ok {
                     break;
@@ -647,13 +631,13 @@ impl GB<GBWrite> {
                 break;
             }
         }
-        (gb, fail)
+        fail
     }
-    fn to_read(self) -> GB<GBRead> {
-        GB {
-            cart: self.cart.to_read(),
-        }
-    }
+    // fn to_read(self) -> GB<GBRead> {
+    //     GB {
+    //         cart: self.cart.to_read(),
+    //     }
+    // }
 }
 
 trait GBAData {}
