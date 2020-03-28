@@ -22,6 +22,7 @@ use cortex_m_rt::entry;
 use hal::{nb::block, prelude::*, stm32};
 use stm32f4xx_hal as hal;
 
+use serde::Deserialize;
 use urpc::{
     consts,
     server::{self, Request},
@@ -35,6 +36,12 @@ use crate::serial::Read as _;
 use crate::serial::Serial;
 use crate::serial::Write as _;
 
+#[derive(Debug, Deserialize)]
+enum ReqMode {
+    GB,
+    GBA,
+}
+
 server_requests! {
     ServerRequest;
     (0, Ping([u8; 4], OptBufNo, [u8; 4], OptBufNo)),
@@ -43,9 +50,11 @@ server_requests! {
     (3, RecvBytes((), OptBufNo, (), OptBufYes)),
     (4, SendRecv((), OptBufYes, (), OptBufYes)),
     (5, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
-    (6, GBMode((), OptBufNo, bool, OptBufNo)),
+    (6, Mode(ReqMode, OptBufNo, bool, OptBufNo)),
     (7, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
-    (8, GBWrite(u16, OptBufYes, (), OptBufNo))
+    (8, GBWrite(u16, OptBufYes, (), OptBufNo)),
+    // (9, GBFlashErase((), OptBufNo, (), OptBufNo)),
+    (10, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo))
 }
 
 #[entry]
@@ -87,16 +96,18 @@ fn main() -> ! {
 
     serial.write_all(b"\nHELLO\n").ok();
 
-    let mut mode = Mode::Resources(Resources {
-        gpioc: dp.GPIOC.split(),
-        gpiob: dp.GPIOB.split(),
-        gpioa_0: gpioa.pa0,
-        gpioa_1: gpioa.pa1,
-        gpioa_6: gpioa.pa6,
-        gpioa_7: gpioa.pa7,
-        gpioa_8: gpioa.pa8,
-        gpioa_9: gpioa.pa9,
-        gpioa_10: gpioa.pa10,
+    let mut mode = Mode::GB(GB {
+        cart: GBCart::take(Resources {
+            gpioc: dp.GPIOC.split(),
+            gpiob: dp.GPIOB.split(),
+            gpioa_0: gpioa.pa0,
+            gpioa_1: gpioa.pa1,
+            gpioa_6: gpioa.pa6,
+            gpioa_7: gpioa.pa7,
+            gpioa_8: gpioa.pa8,
+            gpioa_9: gpioa.pa9,
+            gpioa_10: gpioa.pa10,
+        }),
     });
 
     // let gpioa = GpioPortA::take(dp.GPIOA.split(), 1 << 5);
@@ -153,6 +164,8 @@ fn main() -> ! {
     let mut tx_buf = [0; 0x4100];
 
     let mut rx_len = consts::REQ_HEADER_LEN;
+
+    led.toggle().unwrap();
     loop {
         serial.read_exact(&mut rx_buf[..rx_len]).ok();
         rx_len = match ServerRequest::from_rpc(&mut rpc_server, &rx_buf[..rx_len]).unwrap() {
@@ -206,16 +219,26 @@ fn main() -> ! {
                             req.reply((), 0, &mut tx_buf).unwrap()
                         }
                     }
-                    ServerRequest::GBMode(req) => {
-                        if let Mode::Resources(rs) = mode {
-                            let gb = GB {
-                                cart: GBCart::take(rs),
-                            };
-                            mode = Mode::GB(gb);
-                            req.reply(true, &mut tx_buf).unwrap()
-                        } else {
-                            req.reply(false, &mut tx_buf).unwrap()
+                    ServerRequest::Mode(req) => {
+                        let rs = match mode {
+                            Mode::GB(gb) => gb.cart.release(),
+                            Mode::GBA(gba) => gba.cart.release(),
+                        };
+                        match req.body {
+                            ReqMode::GB => {
+                                let gb = GB {
+                                    cart: GBCart::take(rs),
+                                };
+                                mode = Mode::GB(gb);
+                            }
+                            ReqMode::GBA => {
+                                let gba = GBA {
+                                    cart: GBACart::take(rs),
+                                };
+                                mode = Mode::GBA(gba);
+                            }
                         }
+                        req.reply(false, &mut tx_buf).unwrap()
                     }
                     ServerRequest::GBWriteWord(req) => {
                         if let Mode::GB(gb) = mode {
@@ -239,8 +262,30 @@ fn main() -> ! {
                             req.reply((), &mut tx_buf).unwrap()
                         }
                     }
+                    // ServerRequest::GBFlashErase(req) => {
+                    //     if let Mode::GB(gb) = mode {
+                    //         let mut gb = gb.to_write();
+                    //         gb.flash_erase();
+                    //         mode = Mode::GB(gb.to_read());
+                    //         req.reply((), &mut tx_buf).unwrap()
+                    //     } else {
+                    //         req.reply((), &mut tx_buf).unwrap()
+                    //     }
+                    // }
+                    ServerRequest::GBFlashWrite((req, buf)) => {
+                        if let Mode::GB(gb) = mode {
+                            let addr = req.body;
+                            let mut gb = gb.to_write();
+                            let (mut gb, fail) = gb.flash_write(addr, buf);
+                            mode = Mode::GB(gb.to_read());
+                            req.reply(fail, &mut tx_buf).unwrap()
+                        } else {
+                            req.reply(None, &mut tx_buf).unwrap()
+                        }
+                    }
                 };
                 serial.write_all(&tx_buf[..tx_len]).ok();
+                led.toggle().unwrap();
                 consts::REQ_HEADER_LEN
             }
         };
@@ -268,8 +313,8 @@ use hal::gpio::{gpioa, gpiob, gpioc};
 use hal::gpio::{Floating, Input, OpenDrain, Output, PullDown, PushPull};
 
 enum Mode {
-    Resources(Resources),
     GB(GB<GBRead>),
+    GBA(GBA<GBARead>),
 }
 
 struct Resources {
@@ -359,7 +404,7 @@ impl GBCart<GBRead> {
         s.set_pin(GBPin::RESET, false);
         s
     }
-    fn to_resources(self) -> Resources {
+    fn release(self) -> Resources {
         Resources {
             gpioc: self.addr_0_13.release(),
             gpiob: self.data.release(),
@@ -495,19 +540,104 @@ impl GB<GBWrite> {
         delay(20);
 
         self.cart.set_pin(GBPin::WR, false);
-        delay(5);
+        // delay(5);
         // gpio_data_setup_input();
         self.cart.set_pin(GBPin::CS, false);
-        delay(10);
+        delay(25);
     }
     fn write(&mut self, addr: u16, bytes: &[u8]) {
         for (i, byte) in bytes.iter().enumerate() {
             self.write_byte(addr + i as u16, *byte);
         }
     }
+    fn flash_write_byte(self, addr: u16, byte: u8) -> (Self, bool, u8) {
+        let mut gb = self;
+        gb.write_byte(0x0AAA, 0xA9);
+        gb.write_byte(0x0555, 0x56);
+        gb.write_byte(0x0AAA, 0xA0);
+        gb.write_byte(addr, byte);
+        let mut gb = gb.to_read();
+        let mut ok = false;
+        let mut b = 0;
+        for _ in 0..50 {
+            delay(10);
+            let b0 = gb.read_byte(addr);
+            let b1 = gb.read_byte(addr);
+            b = b1;
+            if b0 & (1 << 6) == b1 & (1 << 6) {
+                // if b == byte {
+                ok = true;
+                break;
+            } else if b0 & (1 << 5) != 0 {
+                break;
+            }
+        }
+        (gb.to_write(), ok, b)
+    }
+    fn flash_write(self, addr: u16, bytes: &[u8]) -> (Self, Option<(u16, u8)>) {
+        // For some reason, the first byte may not be written, so we force the
+        // first write to do nothing.
+        let mut gb = self;
+        let mut fail = None;
+        // let (mut gb, mut ok) = self.flash_write_byte(addr, 0xff);
+        for (i, byte) in bytes.iter().enumerate() {
+            // self.flash_write_byte(addr + i as u16, *byte);
+            for _ in 0..4 {
+                let (_gb, ok, b) = gb.flash_write_byte(addr + i as u16, *byte);
+                gb = _gb;
+                if !ok {
+                    fail = Some((addr + i as u16, b));
+                    break;
+                }
+                if b == *byte {
+                    break;
+                }
+            }
+            if let Some(_) = fail {
+                break;
+            }
+            // let (_gb, _ok) = gb.flash_write_byte(addr + i as u16, *byte);
+            // gb = _gb;
+            // ok = _ok;
+            //     if ok {
+            //         break;
+            //     }
+            // }
+        }
+        (gb, fail)
+        // (gb, true)
+    }
+    fn flash_erase(&mut self) {
+        unimplemented!();
+    }
     fn to_read(self) -> GB<GBRead> {
         GB {
             cart: self.cart.to_read(),
         }
+    }
+}
+
+trait GBAData {}
+
+struct GBA<D: GBAData> {
+    cart: GBACart<D>,
+}
+
+struct GBACart<D: GBAData> {
+    _panthom: core::marker::PhantomData<D>,
+}
+
+struct GBARead {}
+
+impl GBAData for GBARead {}
+
+impl GBACart<GBARead> {
+    fn take(rs: Resources) -> Self {
+        Self {
+            _panthom: core::marker::PhantomData::<GBARead>,
+        }
+    }
+    fn release(self) -> Resources {
+        unimplemented!();
     }
 }

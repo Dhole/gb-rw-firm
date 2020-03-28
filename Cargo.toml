@@ -21,3 +21,7 @@ stm32f4 = "0.10.0"
 [dependencies.urpc]
 path = "/home/dev/git/urpc"
 default-features = false
+
+[dependencies.serde]
+version = "1.0.102"
+default-features = false

@@ -1,5 +1,3 @@
-#![feature(trait_alias)]
-
 use nb;
 use stm32f4xx_hal as hal;
 

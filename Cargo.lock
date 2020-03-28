@@ -105,6 +105,7 @@ dependencies = [
  "nb",
  "panic-halt",
  "panic-semihosting",
+ "serde",
  "stm32f4",
  "stm32f4xx-hal",
  "urpc",
@@ -172,6 +173,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63e1afe738d71b1ebab5f1207c055054015427dbfc7bbe9ee1266894156ec046"
+dependencies = [
+ "paste-impl",
+ "proc-macro-hack",
+]
+
+[[package]]
+name = "paste-impl"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d4dc4a7f6f743211c5aab239640a65091535d97d43d92a52bca435a640892bb"
+dependencies = [
+ "proc-macro-hack",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "postcard"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -188,6 +211,12 @@ name = "postcard-cobs"
 version = "0.1.5-pre"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c68cb38ed13fd7bc9dd5db8f165b7c8d9c1a315104083a2b10f11354c2af97f"
+
+[[package]]
+name = "proc-macro-hack"
+version = "0.5.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcfdefadc3d57ca21cf17990a28ef4c0f7c61383a28cb7604cf4a18e6ede1420"
 
 [[package]]
 name = "proc-macro2"
@@ -326,6 +355,7 @@ name = "urpc"
 version = "0.1.0-alpha.1"
 dependencies = [
  "heapless",
+ "paste",
  "postcard",
  "serde",
 ]
