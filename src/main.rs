@@ -56,7 +56,8 @@ server_requests! {
     // (9, GBFlashErase((), OptBufNo, (), OptBufNo)),
     (10, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
     (11, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
-    (12, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo))
+    (12, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
+    (13, GBARead((u32, u16), OptBufNo, (), OptBufYes))
 }
 
 #[entry]
@@ -213,7 +214,7 @@ fn main() -> ! {
                             let (addr_start, size) = req.body;
                             let rep_buf_len = {
                                 let rep_buf = req.get_opt_buf(&mut tx_buf);
-                                gb.read_bytes(addr_start, &mut rep_buf[..size as usize]);
+                                gb.read(addr_start, &mut rep_buf[..size as usize]);
                                 size
                             };
                             req.reply((), rep_buf_len as u16, &mut tx_buf).unwrap()
@@ -286,6 +287,19 @@ fn main() -> ! {
                             req.reply((0, 0), &mut tx_buf).unwrap()
                         }
                     }
+                    ServerRequest::GBARead(req) => {
+                        if let Mode::GBA(gba) = &mut mode {
+                            let (addr_start, size) = req.body;
+                            let rep_buf_len = {
+                                let rep_buf = req.get_opt_buf(&mut tx_buf);
+                                gba.read(addr_start, &mut rep_buf[..size as usize]);
+                                size
+                            };
+                            req.reply((), rep_buf_len as u16, &mut tx_buf).unwrap()
+                        } else {
+                            req.reply((), 0, &mut tx_buf).unwrap()
+                        }
+                    }
                 };
                 serial.write_all(&tx_buf[..tx_len]).ok();
                 led.toggle().unwrap();
@@ -317,7 +331,7 @@ use hal::gpio::{Floating, Input, OpenDrain, Output, PullDown, PushPull};
 
 enum Mode {
     GB(GB),
-    GBA(GBA<GBARead>),
+    GBA(GBA),
 }
 
 struct Resources {
@@ -514,19 +528,12 @@ impl GB {
 
         return byte;
     }
-    fn read_bytes(&mut self, addr: u16, buf: &mut [u8]) {
+    fn read(&mut self, addr: u16, buf: &mut [u8]) {
         for i in 0..buf.len() {
             buf[i] = self.read_byte(addr + i as u16)
         }
     }
-    // fn to_write(self) -> GB<GBWrite> {
-    //     GB {
-    //         cart: self.cart.to_write(),
-    //     }
-    // }
-}
 
-impl GB {
     fn write_byte(&mut self, addr: u16, byte: u8) {
         let mut cart = self.cart.take().unwrap().to_write();
         // Set address
@@ -633,34 +640,281 @@ impl GB {
         }
         fail
     }
-    // fn to_read(self) -> GB<GBRead> {
-    //     GB {
-    //         cart: self.cart.to_read(),
-    //     }
-    // }
 }
 
-trait GBAData {}
+trait GBAAddrData {}
 
-struct GBA<D: GBAData> {
-    cart: GBACart<D>,
+struct GBADataRead {
+    data_0_13: GpioPortC<Input<PullDown>>,
+    data_14: gpioa::PA0<Input<PullDown>>,
+    data_15: gpioa::PA1<Input<PullDown>>,
+    _unused: GpioPortB<Output<PushPull>>,
 }
 
-struct GBACart<D: GBAData> {
-    _panthom: core::marker::PhantomData<D>,
-}
+impl GBAAddrData for GBADataRead {}
 
-struct GBARead {}
-
-impl GBAData for GBARead {}
-
-impl GBACart<GBARead> {
-    fn take(rs: Resources) -> Self {
-        Self {
-            _panthom: core::marker::PhantomData::<GBARead>,
+impl GBADataRead {
+    fn to_gba_addr(self) -> GBAAddr {
+        GBAAddr {
+            addr_0_13: self.data_0_13.into_push_pull_output(),
+            addr_14: self.data_14.into_push_pull_output(),
+            addr_15: self.data_15.into_push_pull_output(),
+            addr_16_24: self._unused,
         }
     }
-    fn release(self) -> Resources {
-        unimplemented!();
+
+    fn get(&mut self) -> u16 {
+        let mut data = self.data_0_13.read().unwrap() & 0b0011_1111_1111_1111;
+        data |= if self.data_14.is_high().unwrap() {
+            1 << 14
+        } else {
+            0
+        };
+        data |= if self.data_15.is_high().unwrap() {
+            1 << 15
+        } else {
+            0
+        };
+
+        data
+    }
+}
+
+struct GBADataWrite {
+    data_0_13: GpioPortC<Output<PushPull>>,
+    data_14: gpioa::PA0<Output<PushPull>>,
+    data_15: gpioa::PA1<Output<PushPull>>,
+    _unused: GpioPortB<Output<PushPull>>,
+}
+
+impl GBAAddrData for GBADataWrite {}
+
+impl GBADataWrite {
+    fn to_gba_addr(self) -> GBAAddr {
+        GBAAddr {
+            addr_0_13: self.data_0_13.into_push_pull_output(),
+            addr_14: self.data_14.into_push_pull_output(),
+            addr_15: self.data_15.into_push_pull_output(),
+            addr_16_24: self._unused,
+        }
+    }
+    fn set(&mut self, word: u16) {
+        self.data_0_13.write(word).unwrap();
+        if word & (1 << 14) != 0 {
+            self.data_14.set_high()
+        } else {
+            self.data_14.set_low()
+        }
+        .unwrap();
+        if word & (1 << 15) != 0 {
+            self.data_15.set_high()
+        } else {
+            self.data_15.set_low()
+        }
+        .unwrap();
+    }
+}
+
+struct GBAAddr {
+    addr_0_13: GpioPortC<Output<PushPull>>,
+    addr_14: gpioa::PA0<Output<PushPull>>,
+    addr_15: gpioa::PA1<Output<PushPull>>,
+    addr_16_24: GpioPortB<Output<PushPull>>,
+}
+
+impl GBAAddrData for GBAAddr {}
+
+impl GBAAddr {
+    fn to_gba_data_read(self) -> GBADataRead {
+        GBADataRead {
+            data_0_13: self.addr_0_13.into_pull_down_input(),
+            data_14: self.addr_14.into_pull_down_input(),
+            data_15: self.addr_15.into_pull_down_input(),
+            _unused: self.addr_16_24,
+        }
+    }
+    fn to_gba_data_write(self) -> GBADataWrite {
+        GBADataWrite {
+            data_0_13: self.addr_0_13,
+            data_14: self.addr_14,
+            data_15: self.addr_15,
+            _unused: self.addr_16_24,
+        }
+    }
+    fn set(&mut self, addr: u32) {
+        let addr = addr >> 1;
+
+        self.addr_0_13.write((addr & 0x0000ffff) as u16).unwrap();
+        if addr & (1 << 14) != 0 {
+            self.addr_14.set_high()
+        } else {
+            self.addr_14.set_low()
+        }
+        .unwrap();
+        if addr & (1 << 15) != 0 {
+            self.addr_15.set_high()
+        } else {
+            self.addr_15.set_low()
+        }
+        .unwrap();
+        self.addr_16_24.write((addr >> 16) as u16).unwrap();
+    }
+}
+
+struct GBACart {
+    addr: Option<GBAAddr>,
+    cs: gpioa::PA8<Output<PushPull>>,
+    rd: gpioa::PA7<Output<PushPull>>,
+    wr: gpioa::PA6<Output<PushPull>>,
+    clk: gpioa::PA10<Output<PushPull>>,
+    cs2: gpioa::PA9<Output<PushPull>>,
+}
+
+enum GBAPin {
+    CS,
+    CS2,
+    RD,
+    WR,
+    CLK,
+}
+
+impl GBACart {
+    fn take(rs: Resources) -> Self {
+        Self {
+            addr: Some(GBAAddr {
+                addr_0_13: GpioPortC::take(rs.gpioc, 0b0011_1111_1111_1111).into_push_pull_output(),
+                addr_14: rs.gpioa_0.into_push_pull_output(),
+                addr_15: rs.gpioa_1.into_push_pull_output(),
+                addr_16_24: GpioPortB::take(rs.gpiob, 0x00ff).into_push_pull_output(),
+            }),
+            cs: rs.gpioa_8.into_push_pull_output(),
+            rd: rs.gpioa_7.into_push_pull_output(),
+            wr: rs.gpioa_6.into_push_pull_output(),
+            clk: rs.gpioa_10.into_push_pull_output(),
+            cs2: rs.gpioa_9.into_push_pull_output(),
+        }
+    }
+
+    fn release(mut self) -> Resources {
+        Resources {
+            gpioc: self.addr.take().unwrap().addr_0_13.release(),
+            gpiob: self.addr.take().unwrap().addr_16_24.release(),
+            gpioa_0: self.addr.take().unwrap().addr_14.into_floating_input(),
+            gpioa_1: self.addr.take().unwrap().addr_15.into_floating_input(),
+            gpioa_6: self.wr.into_floating_input(),
+            gpioa_7: self.rd.into_floating_input(),
+            gpioa_8: self.cs.into_floating_input(),
+            gpioa_9: self.cs2.into_floating_input(),
+            gpioa_10: self.clk.into_floating_input(),
+        }
+    }
+
+    // fn set_addr(&mut self, addr: u32) {
+    //     let addr = addr >> 1;
+    //     let mut cart = self.addr.as_mut().unwrap();
+    //     cart.set_addr(addr);
+    // }
+
+    // fn set_data(&mut self, word: u16) {
+    //     let mut cart = self.addr.take().unwrap().to_gba_data_write();
+
+    //     cart.data_0_13.write(word).unwrap();
+    //     if word & (1 << 14) != 0 {
+    //         cart.data_14.set_high()
+    //     } else {
+    //         cart.data_14.set_low()
+    //     }
+    //     .unwrap();
+    //     if word & (1 << 15) != 0 {
+    //         cart.data_15.set_high()
+    //     } else {
+    //         cart.data_15.set_low()
+    //     }
+    //     .unwrap();
+
+    //     self.addr = Some(cart.to_gba_addr());
+    // }
+
+    // fn data(&mut self) -> u16 {
+    //     let mut cart = self.addr.take().unwrap().to_gba_data_read();
+
+    //     let mut data = cart.data_0_13.read().unwrap() & 0b0011_1111_1111_1111;
+    //     data |= if cart.data_14.is_high().unwrap() {
+    //         1 << 14
+    //     } else {
+    //         0
+    //     };
+    //     data |= if cart.data_15.is_high().unwrap() {
+    //         1 << 15
+    //     } else {
+    //         0
+    //     };
+
+    //     self.addr = Some(cart.to_gba_addr());
+    //     data
+    // }
+
+    #[rustfmt::skip]
+    fn set_pin(&mut self, pin: GBAPin, v: bool) {
+        match pin {
+            GBAPin::CS => { if v { self.cs.set_low() } else { self.cs.set_high() } }
+            GBAPin::CS2 => { if v { self.cs2.set_low() } else { self.cs2.set_high() } }
+            GBAPin::RD => { if v { self.rd.set_low() } else { self.rd.set_high() } }
+            GBAPin::WR => { if v { self.wr.set_low() } else { self.wr.set_high() } }
+            GBAPin::CLK => { if v { self.clk.set_low() } else { self.clk.set_high() } }
+        }.unwrap()
+    }
+}
+
+struct GBA {
+    cart: GBACart,
+}
+
+impl GBA {
+    fn latch_addr(&mut self, addr: u32) {
+        let cart_addr = self.cart.addr.as_mut().unwrap();
+        cart_addr.set(addr);
+        self.cart.set_pin(GBAPin::CS, true);
+        delay(200 * 3);
+    }
+    fn latch_addr_fast(&mut self, addr: u32) {
+        let cart_addr = self.cart.addr.as_mut().unwrap();
+        cart_addr.set(addr);
+        self.cart.set_pin(GBAPin::CS, true);
+        delay(10);
+    }
+    fn unlatch_addr(&mut self) {
+        self.cart.set_pin(GBAPin::CS, false);
+        delay(5 * 3);
+    }
+    fn _read_word(&mut self, data_read: &mut GBADataRead) -> u16 {
+        self.cart.set_pin(GBAPin::RD, true);
+        delay(50 * 1);
+        let word = data_read.get();
+        self.cart.set_pin(GBAPin::RD, false);
+        delay(20 * 1);
+        return word;
+    }
+    fn read_word(&mut self, addr: u32) -> u16 {
+        self.latch_addr(addr);
+        let mut data_read = self.cart.addr.take().unwrap().to_gba_data_read();
+        let word = self._read_word(&mut data_read);
+        self.unlatch_addr();
+
+        self.cart.addr = Some(data_read.to_gba_addr());
+        return word;
+    }
+    fn read(&mut self, addr: u32, buf: &mut [u8]) {
+        self.latch_addr(addr);
+        let mut data_read = self.cart.addr.take().unwrap().to_gba_data_read();
+        for i in (0..buf.len()).step_by(2) {
+            let word = self._read_word(&mut data_read);
+
+            buf[i] = (word & 0x00ff) as u8;
+            buf[i + 1] = ((word & 0xff00) >> 8) as u8;
+        }
+        self.unlatch_addr();
+
+        self.cart.addr = Some(data_read.to_gba_addr());
     }
 }
