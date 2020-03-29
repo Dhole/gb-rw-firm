@@ -42,6 +42,21 @@ enum ReqMode {
     GBA,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+struct GBStats {
+    flash_write_retries: u64,
+    flash_write_errors: u64,
+}
+
+impl GBStats {
+    fn new() -> Self {
+        Self {
+            flash_write_retries: 0,
+            flash_write_errors: 0,
+        }
+    }
+}
+
 server_requests! {
     ServerRequest;
     (0, Ping([u8; 4], OptBufNo, [u8; 4], OptBufNo)),
@@ -57,7 +72,8 @@ server_requests! {
     (10, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
     (11, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
     (12, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
-    (13, GBARead((u32, u16), OptBufNo, (), OptBufYes))
+    (13, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
+    (14, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo))
 }
 
 #[entry]
@@ -99,19 +115,17 @@ fn main() -> ! {
 
     serial.write_all(b"\nHELLO\n").ok();
 
-    let mut mode = Mode::GB(GB {
-        cart: Some(GBCart::take(Resources {
-            gpioc: dp.GPIOC.split(),
-            gpiob: dp.GPIOB.split(),
-            gpioa_0: gpioa.pa0,
-            gpioa_1: gpioa.pa1,
-            gpioa_6: gpioa.pa6,
-            gpioa_7: gpioa.pa7,
-            gpioa_8: gpioa.pa8,
-            gpioa_9: gpioa.pa9,
-            gpioa_10: gpioa.pa10,
-        })),
-    });
+    let mut mode = Mode::GB(GB::new(Resources {
+        gpioc: dp.GPIOC.split(),
+        gpiob: dp.GPIOB.split(),
+        gpioa_0: gpioa.pa0,
+        gpioa_1: gpioa.pa1,
+        gpioa_6: gpioa.pa6,
+        gpioa_7: gpioa.pa7,
+        gpioa_8: gpioa.pa8,
+        gpioa_9: gpioa.pa9,
+        gpioa_10: gpioa.pa10,
+    }));
 
     // let gpioa = GpioPortA::take(dp.GPIOA.split(), 1 << 5);
     // let gpioa = gpioa.into_push_pull_output();
@@ -229,9 +243,7 @@ fn main() -> ! {
                         };
                         match req.body {
                             ReqMode::GB => {
-                                let gb = GB {
-                                    cart: Some(GBCart::take(rs)),
-                                };
+                                let gb = GB::new(rs);
                                 mode = Mode::GB(gb);
                             }
                             ReqMode::GBA => {
@@ -298,6 +310,13 @@ fn main() -> ! {
                             req.reply((), rep_buf_len as u16, &mut tx_buf).unwrap()
                         } else {
                             req.reply((), 0, &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBGetStats(req) => {
+                        if let Mode::GB(gb) = &mut mode {
+                            req.reply(Some(gb.stats()), &mut tx_buf).unwrap()
+                        } else {
+                            req.reply(None, &mut tx_buf).unwrap()
                         }
                     }
                 };
@@ -509,9 +528,19 @@ enum GBPin {
 
 struct GB {
     cart: Option<GBCart<GBRead>>,
+    stats: GBStats,
 }
 
 impl GB {
+    fn new(rs: Resources) -> Self {
+        Self {
+            cart: Some(GBCart::take(rs)),
+            stats: GBStats::new(),
+        }
+    }
+    fn stats(&self) -> GBStats {
+        self.stats
+    }
     fn read_byte(&mut self, addr: u16) -> u8 {
         let mut cart = self.cart.as_mut().unwrap();
         cart.set_addr(addr);
@@ -579,9 +608,12 @@ impl GB {
             // Q6 toggles during Flash Auto Program Algorithm
             // Q5 = 1 indicates failure
             if b0 & (1 << 6) == b1 & (1 << 6) {
+                self.write_byte(0x0000, 0xFF); // reset
+                b1 = self.read_byte(addr);
                 ok = true;
                 break;
             } else if b0 & (1 << 5) != 0 {
+                self.stats.flash_write_errors += 1;
                 break;
             }
         }
@@ -596,7 +628,7 @@ impl GB {
         self.write_byte(addr, 0x30);
         let mut ok = false;
         for _ in 0..800 {
-            delay(1000);
+            delay(100);
             let b = self.read_byte(addr);
             if b == 0xff {
                 ok = true;
@@ -633,6 +665,7 @@ impl GB {
                     fail = None;
                     break;
                 }
+                self.stats.flash_write_retries += 1;
             }
             if let Some(_) = fail {
                 break;
