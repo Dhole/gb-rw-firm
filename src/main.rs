@@ -627,8 +627,8 @@ impl GB {
         self.write_byte(0x0555, 0x56);
         self.write_byte(addr, 0x30);
         let mut ok = false;
-        for _ in 0..800 {
-            delay(100);
+        for _ in 0..100000 {
+            delay(1000);
             let b = self.read_byte(addr);
             if b == 0xff {
                 ok = true;
