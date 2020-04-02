@@ -57,6 +57,11 @@ impl GBStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub enum FlashType {
+    F3 = 3,
+}
+
 server_requests! {
     ServerRequest;
     (0, Ping([u8; 4], OptBufNo, [u8; 4], OptBufNo)),
@@ -73,7 +78,12 @@ server_requests! {
     (11, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
     (12, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
     (13, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
-    (14, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo))
+    (14, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
+    (15, GBAWriteWord((u32, u16), OptBufNo, (), OptBufNo)),
+    (16, GBAFlashWrite((FlashType, u32), OptBufYes, Option<u32>, OptBufNo)),
+    (17, GBAFlashUnlockSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+    (18, GBAFlashEraseSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+    (255, Test((), OptBufNo, Option<[(u16, u16); 8]>, OptBufNo)) // 1
 }
 
 #[entry]
@@ -175,10 +185,10 @@ fn main() -> ! {
     //     delay.delay_ms(500_u32);
     // }
 
-    let mut rpc_server = server::RpcServer::new(0x4100 as u16);
+    let mut rpc_server = server::RpcServer::new(0x8100 as u16);
 
-    let mut rx_buf = [0; 0x4100];
-    let mut tx_buf = [0; 0x4100];
+    let mut rx_buf = [0; 0x8100];
+    let mut tx_buf = [0; 0x8100];
 
     let mut rx_len = consts::REQ_HEADER_LEN;
 
@@ -315,6 +325,50 @@ fn main() -> ! {
                     ServerRequest::GBGetStats(req) => {
                         if let Mode::GB(gb) = &mut mode {
                             req.reply(Some(gb.stats()), &mut tx_buf).unwrap()
+                        } else {
+                            req.reply(None, &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBAWriteWord(req) => {
+                        if let Mode::GBA(gba) = &mut mode {
+                            let (addr, word) = req.body;
+                            gba.write_word(addr, word);
+                            req.reply((), &mut tx_buf).unwrap()
+                        } else {
+                            req.reply((), &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBAFlashWrite((req, buf)) => {
+                        if let Mode::GBA(gba) = &mut mode {
+                            let (flash_type, addr) = req.body;
+                            let fail = gba.flash_write(flash_type, addr, &buf);
+                            req.reply(fail, &mut tx_buf).unwrap()
+                        } else {
+                            req.reply(None, &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBAFlashUnlockSector(req) => {
+                        if let Mode::GBA(gba) = &mut mode {
+                            let (flash_type, sector) = req.body;
+                            let ok = gba.flash_unlock_sector(flash_type, sector);
+                            req.reply(ok, &mut tx_buf).unwrap()
+                        } else {
+                            req.reply(false, &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::GBAFlashEraseSector(req) => {
+                        if let Mode::GBA(gba) = &mut mode {
+                            let (flash_type, sector) = req.body;
+                            let ok = gba.flash_erase_sector(flash_type, sector);
+                            req.reply(ok, &mut tx_buf).unwrap()
+                        } else {
+                            req.reply(false, &mut tx_buf).unwrap()
+                        }
+                    }
+                    ServerRequest::Test(req) => {
+                        if let Mode::GBA(gba) = &mut mode {
+                            let result = gba.test1();
+                            req.reply(Some(result), &mut tx_buf).unwrap()
                         } else {
                             req.reply(None, &mut tx_buf).unwrap()
                         }
@@ -914,7 +968,7 @@ impl GBA {
         let cart_addr = self.cart.addr.as_mut().unwrap();
         cart_addr.set(addr);
         self.cart.set_pin(GBAPin::CS, true);
-        delay(10);
+        delay(10 * 3);
     }
     fn unlatch_addr(&mut self) {
         self.cart.set_pin(GBAPin::CS, false);
@@ -928,6 +982,21 @@ impl GBA {
         delay(20 * 1);
         return word;
     }
+    fn _read_word_fast(&mut self, data_read: &mut GBADataRead) -> u16 {
+        self.cart.set_pin(GBAPin::RD, true);
+        delay(5);
+        let word = data_read.get();
+        self.cart.set_pin(GBAPin::RD, false);
+        delay(5);
+        return word;
+    }
+    fn _write_word(&mut self, word: u16, data_write: &mut GBADataWrite) {
+        self.cart.set_pin(GBAPin::WR, true);
+        delay(5);
+        data_write.set(word);
+        self.cart.set_pin(GBAPin::WR, false);
+        delay(5);
+    }
     fn read_word(&mut self, addr: u32) -> u16 {
         self.latch_addr(addr);
         let mut data_read = self.cart.addr.take().unwrap().to_gba_data_read();
@@ -936,6 +1005,14 @@ impl GBA {
 
         self.cart.addr = Some(data_read.to_gba_addr());
         return word;
+    }
+    fn write_word(&mut self, addr: u32, word: u16) {
+        self.latch_addr(addr);
+        let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+        self._write_word(word, &mut data_write);
+        self.unlatch_addr();
+
+        self.cart.addr = Some(data_write.to_gba_addr());
     }
     fn read(&mut self, addr: u32, buf: &mut [u8]) {
         self.latch_addr(addr);
@@ -949,5 +1026,220 @@ impl GBA {
         self.unlatch_addr();
 
         self.cart.addr = Some(data_read.to_gba_addr());
+    }
+    fn flash_f3_unlock_sector(&mut self, sector: u32) -> bool {
+        self.latch_addr_fast(sector);
+        let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+        self._write_word(0xff, &mut data_write);
+        self._write_word(0x60, &mut data_write);
+        self._write_word(0xd0, &mut data_write);
+        self._write_word(0x90, &mut data_write);
+        self.unlatch_addr();
+        self.cart.addr = Some(data_write.to_gba_addr());
+
+        true
+        // for i in 0..1_000_000 {
+        //     let b = self.read_word(sector + 2);
+        //     if b & 0x0003 == 0x0000 {
+        //         return true;
+        //     }
+        //     delay(100);
+        // }
+        // false
+    }
+    fn flash_f3_erase_sector(&mut self, sector: u32) -> bool {
+        self.latch_addr_fast(sector);
+        let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+        self._write_word(0xff, &mut data_write);
+        self._write_word(0x20, &mut data_write);
+        self._write_word(0xd0, &mut data_write);
+        self.unlatch_addr();
+        self.cart.addr = Some(data_write.to_gba_addr());
+
+        for i in 0..1_000_000 {
+            delay(1_000);
+            let b = self.read_word(sector);
+            if b == 0x80 {
+                return true;
+            }
+        }
+        false
+    }
+    fn flash_f3_write(&mut self, addr: u32, buf: &[u8]) -> Option<u32> {
+        for i in (0..buf.len()).step_by(2) {
+            self.latch_addr_fast(addr);
+            let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+            self._write_word(0xff, &mut data_write);
+            self._write_word(0x40, &mut data_write);
+            self.unlatch_addr();
+            self.cart.addr = Some(data_write.to_gba_addr());
+
+            let word = u16::from_le_bytes([buf[i], buf[i + 1]]);
+            self.write_word(addr + i as u32, word);
+
+            let mut ok = false;
+            for i in 0..1_000_000 {
+                delay(1_000);
+                let b = self.read_word(addr);
+                if b == 0x80 {
+                    ok = true;
+                    break;
+                }
+            }
+            if !ok {
+                return Some(addr + i as u32);
+            }
+        }
+        self.write_word(addr, 0xff);
+        None
+    }
+    // fn flash_f3_write(&mut self, addr: u32, buf: &[u8]) -> Option<(u32, u16)> {
+    //     for i in (0..buf.len()).step_by(2) {
+    //         // addr = addr_start + i;
+
+    //         self.latch_addr_fast(addr);
+    //         // _bus_gba_write_word(0xff);
+    //         // _bus_gba_write_word(0x70);
+    //         // unlatch_gba_addr();
+    //         // nop_loop(20);
+
+    //         // bus_gba_write_word_fast(addr, 0xff);
+    //         // bus_gba_write_word_fast(addr, 0x70);
+    //         // while (bus_gba_read_word_fast(addr) != 0x80);
+
+    //         // while (_bus_gba_read_word() != 0x80);
+
+    //         // latch_gba_addr_fast(addr_start);
+    //         let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+    //         self._write_word(0x00ff, &mut data_write);
+    //         self._write_word(0x0040, &mut data_write);
+    //         self.unlatch_addr();
+    //         self.cart.addr = Some(data_write.to_gba_addr());
+
+    //         let word = u16::from_le_bytes([buf[i], buf[i + 1]]);
+
+    //         //latch_gba_addr_fast(addr);
+    //         self.write_word(addr + i as u32, word);
+    //         //unlatch_gba_addr();
+    //         //nop_loop(20);
+
+    //         self.latch_addr_fast(addr);
+    //         let mut data_read = self.cart.addr.take().unwrap().to_gba_data_read();
+    //         let (mut ok, mut w) = (false, 0);
+    //         for _ in 0..100000 {
+    //             // delay(10);
+    //             w = self._read_word_fast(&mut data_read);
+    //             if w != 0x80 {
+    //                 ok = true;
+    //                 break;
+    //             }
+    //         }
+    //         self.unlatch_addr();
+    //         self.cart.addr = Some(data_read.to_gba_addr());
+    //         // nop_loop(20);
+    //         if !ok {
+    //             return Some((addr + i as u32, w));
+    //         }
+    //     }
+    //     self.write_word(addr, 0xff);
+    //     None
+    // }
+    fn flash_write(&mut self, flash_type: FlashType, addr: u32, buf: &[u8]) -> Option<u32> {
+        match flash_type {
+            FlashType::F3 => self.flash_f3_write(addr, &buf),
+        }
+    }
+    fn flash_unlock_sector(&mut self, flash_type: FlashType, sector: u32) -> bool {
+        match flash_type {
+            FlashType::F3 => self.flash_f3_unlock_sector(sector),
+        }
+    }
+    fn flash_erase_sector(&mut self, flash_type: FlashType, sector: u32) -> bool {
+        match flash_type {
+            FlashType::F3 => self.flash_f3_erase_sector(sector),
+        }
+    }
+    // test1: Unlock sector
+    fn test1(&mut self) -> [(u16, u16); 8] {
+        let mut result = [(0, 0); 8];
+
+        self.latch_addr_fast(0);
+        let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+        self._write_word(0xff, &mut data_write);
+        self._write_word(0x60, &mut data_write);
+        self._write_word(0xd0, &mut data_write);
+        self._write_word(0x90, &mut data_write);
+        self.unlatch_addr();
+        self.cart.addr = Some(data_write.to_gba_addr());
+
+        for i in 0..2 {
+            let a = self.read_word(0);
+            let b = self.read_word(2);
+            result[i] = (a, b);
+            delay(10);
+        }
+
+        self.latch_addr_fast(0);
+        let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+        self._write_word(0xff, &mut data_write);
+        self._write_word(0x20, &mut data_write);
+        self._write_word(0xd0, &mut data_write);
+        self.unlatch_addr();
+        self.cart.addr = Some(data_write.to_gba_addr());
+
+        for i in 2..4 {
+            let a = self.read_word(0);
+            let b = self.read_word(2);
+            result[i] = (a, b);
+            delay(10);
+        }
+        for i in 0..1_000_000 {
+            delay(1_000);
+            let b = self.read_word(0);
+            if b == 0x80 {
+                result[0] = (1, 1);
+                break;
+            }
+        }
+
+        // self.latch_addr_fast(0);
+        // let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+        // self._write_word(0xff, &mut data_write);
+        // self._write_word(0x70, &mut data_write);
+        // self.unlatch_addr();
+        // self.cart.addr = Some(data_write.to_gba_addr());
+
+        // for i in 4..6 {
+        //     let a = self.read_word(0);
+        //     let b = self.read_word(2);
+        //     result[i] = (a, b);
+        //     delay(10);
+        // }
+
+        for v in 0..16 {
+            self.latch_addr_fast(0);
+            let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
+            self._write_word(0xff, &mut data_write);
+            self._write_word(0x40, &mut data_write);
+            self.unlatch_addr();
+            self.cart.addr = Some(data_write.to_gba_addr());
+
+            self.write_word(v * 2, v as u16);
+
+            for i in 0..1_000_000 {
+                delay(1_000);
+                let b = self.read_word(0);
+                if b == 0x80 {
+                    result[1] = (2, 2);
+                    break;
+                }
+            }
+            let b = self.read_word(v * 2);
+            result[2] = (b, b);
+        }
+        // delay(1000000);
+
+        self.write_word(0, 0xff);
+        result
     }
 }
