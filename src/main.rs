@@ -15,11 +15,9 @@ extern crate panic_halt; // panic handler
 #[macro_use]
 extern crate urpc;
 
-// use core::fmt::Write;
-// use core::fmt::Write;
 use cortex_m::{self, asm::delay};
 use cortex_m_rt::entry;
-use hal::{nb::block, prelude::*, stm32};
+use hal::{prelude::*, stm32};
 use stm32f4xx_hal as hal;
 
 use serde::Deserialize;
@@ -29,9 +27,7 @@ use urpc::{
     OptBufNo, OptBufYes,
 };
 
-// use embedded_hal::fmt;
-
-use crate::gpio::{GpioPortA, GpioPortB, GpioPortC};
+use crate::gpio::{GpioPortB, GpioPortC};
 use crate::serial::Read as _;
 use crate::serial::Serial;
 use crate::serial::Write as _;
@@ -64,32 +60,28 @@ pub enum FlashType {
 
 server_requests! {
     ServerRequest;
-    (0, Ping([u8; 4], OptBufNo, [u8; 4], OptBufNo)),
-    (1, SendBytes((), OptBufYes, (), OptBufNo)),
-    (2, Add((u8, u8), OptBufNo, u8, OptBufNo)),
-    (3, RecvBytes((), OptBufNo, (), OptBufYes)),
-    (4, SendRecv((), OptBufYes, (), OptBufYes)),
-    (5, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
-    (6, Mode(ReqMode, OptBufNo, bool, OptBufNo)),
-    (7, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
-    (8, GBWrite(u16, OptBufYes, (), OptBufNo)),
-    // (9, GBFlashErase((), OptBufNo, (), OptBufNo)),
-    (10, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
-    (11, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
-    (12, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
-    (13, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
-    (14, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
-    (15, GBAWriteWord((u32, u16), OptBufNo, (), OptBufNo)),
-    (16, GBAFlashWrite((FlashType, u32), OptBufYes, Option<u32>, OptBufNo)),
-    (17, GBAFlashUnlockSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
-    (18, GBAFlashEraseSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
-    (255, Test((), OptBufNo, Option<[(u16, u16); 8]>, OptBufNo)) // 1
+    (0, ping, Ping([u8; 4], OptBufNo, [u8; 4], OptBufNo)),
+    (1, mode, Mode(ReqMode, OptBufNo, bool, OptBufNo)),
+    (2, gb_read, GBRead((u16, u16), OptBufNo, (), OptBufYes)),
+    (3, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
+    (4, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo)),
+    // (5, gb_flash_erase, GBFlashErase((), OptBufNo, (), OptBufNo)),
+    (6, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
+    (7, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
+    (8, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
+    (9, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
+    (50, gba_read, GBARead((u32, u16), OptBufNo, (), OptBufYes)),
+    (51, gba_write_word, GBAWriteWord((u32, u16), OptBufNo, (), OptBufNo)),
+    (52, gba_flash_write, GBAFlashWrite((FlashType, u32), OptBufYes, Option<u32>, OptBufNo)),
+    (53, gba_flash_unlock_sector, GBAFlashUnlockSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+    (54, gba_flash_erase_sector, GBAFlashEraseSector((FlashType, u32), OptBufNo, bool, OptBufNo)),
+    (255, test1, Test((), OptBufNo, Option<[(u16, u16); 8]>, OptBufNo)) // 1
 }
 
 #[entry]
 fn main() -> ! {
     let dp = stm32::Peripherals::take().unwrap();
-    let cp = cortex_m::peripheral::Peripherals::take().unwrap();
+    // let cp = cortex_m::peripheral::Peripherals::take().unwrap();
 
     // Set up the system clock. We want to run at 48MHz for this one.
     let rcc = dp.RCC.constrain();
@@ -137,54 +129,6 @@ fn main() -> ! {
         gpioa_10: gpioa.pa10,
     }));
 
-    // let gpioa = GpioPortA::take(dp.GPIOA.split(), 1 << 5);
-    // let gpioa = gpioa.into_push_pull_output();
-    // gpioa.write(0xffff).ok();
-
-    // Create a delay abstraction based on SysTick
-    // let mut delay = hal::delay::Delay::new(cp.SYST, clocks);
-
-    // use stm32::GPIOA;
-    // use stm32f4::stm32f411 as stm32;
-
-    // Set up the LED. On the Nucleo-411RE it's connected to pin PA5.
-    // let gpioa = dp.GPIOA.split();
-    // let mut led = gpioa.pa5.into_push_pull_output();
-
-    // let i = 5;
-    // let offset = 2 * i;
-
-    // unsafe {
-    //     &(*GPIOA::ptr())
-    //         .pupdr
-    //         .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (0b00 << offset)));
-    //     &(*GPIOA::ptr())
-    //         .otyper
-    //         .modify(|r, w| w.bits(r.bits() & !(0b1 << i)));
-    //     &(*GPIOA::ptr())
-    //         .moder
-    //         .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (0b01 << offset)))
-    // };
-
-    // On for 1s, off for 1s.
-    // led.set_high().unwrap();
-    // gpioa.write(0xffff).ok();
-    // // unsafe { (*$GPIOX::ptr()).bsrr.write(|w| w.bits(1 << (5 + 16))) };
-    // // unsafe { (*GPIOA::ptr()).bsrr.write(|w| w.bits(1 << i)) };
-    // delay.delay_ms(500_u32);
-    // // led.set_low().unwrap();
-    // gpioa.write(0x0000).ok();
-    // // unsafe { (*GPIOA::ptr()).bsrr.write(|w| w.bits(1 << (i + 16))) };
-    // delay.delay_ms(500_u32);
-
-    // loop {
-    //     // On for 1s, off for 1s.
-    //     led.set_high().unwrap();
-    //     delay.delay_ms(500_u32);
-    //     led.set_low().unwrap();
-    //     delay.delay_ms(500_u32);
-    // }
-
     let mut rpc_server = server::RpcServer::new(0x8100 as u16);
 
     let mut rx_buf = [0; 0x8100];
@@ -202,36 +146,6 @@ fn main() -> ! {
                     ServerRequest::Ping(req) => {
                         let res = ping(req.body);
                         req.reply(res, &mut tx_buf).unwrap()
-                    }
-                    ServerRequest::SendBytes((req, buf)) => {
-                        let res = send_bytes(req.body);
-                        req.reply(res, &mut tx_buf).unwrap()
-                    }
-                    ServerRequest::Add(req) => {
-                        let res = add(req.body);
-                        req.reply(res, &mut tx_buf).unwrap()
-                    }
-                    ServerRequest::RecvBytes(req) => {
-                        let rep_buf_len = {
-                            let rep_buf = req.get_opt_buf(&mut tx_buf);
-                            let n = 8;
-                            for i in 0..n {
-                                rep_buf[i] = (i * 2) as u8;
-                            }
-                            n
-                        };
-                        req.reply((), rep_buf_len as u16, &mut tx_buf).unwrap()
-                    }
-                    ServerRequest::SendRecv((req, req_buf)) => {
-                        let rep_buf_len = {
-                            let rep_buf = req.get_opt_buf(&mut tx_buf);
-                            let n = core::cmp::min(req_buf.len(), rep_buf.len());
-                            for i in 0..n {
-                                rep_buf[i] = req_buf[i] * 2;
-                            }
-                            n
-                        };
-                        req.reply((), rep_buf_len as u16, &mut tx_buf).unwrap()
                     }
                     ServerRequest::GBRead(req) => {
                         if let Mode::GB(gb) = &mut mode {
@@ -386,21 +300,8 @@ fn ping(body: [u8; 4]) -> [u8; 4] {
     body
 }
 
-fn send_bytes(body: ()) -> () {
-    ()
-}
-
-fn send_recv(body: ()) -> () {
-    ()
-}
-
-fn add(body: (u8, u8)) -> u8 {
-    let (x, y) = body;
-    x + y
-}
-
 use hal::gpio::{gpioa, gpiob, gpioc};
-use hal::gpio::{Floating, Input, OpenDrain, Output, PullDown, PushPull};
+use hal::gpio::{Floating, Input, Output, PullDown, PushPull};
 
 enum Mode {
     GB(GB),
@@ -433,11 +334,6 @@ impl GBRead {
     fn read(&mut self) -> u8 {
         (self.0.read().unwrap() & 0x00ff) as u8
     }
-    // fn to_gb_write(self) -> GBWrite {
-    //     GBWrite {
-    //         data: self.data.into_push_pull_output(),
-    //     }
-    // }
 }
 
 impl GBData for GBRead {}
@@ -448,11 +344,6 @@ impl GBWrite {
     fn write(&mut self, v: u8) {
         self.0.write(v as u16).unwrap()
     }
-    // fn to_gb_read(self) -> GBRead {
-    //     GBRead {
-    //         data: self.data.into_pull_down_input(),
-    //     }
-    // }
 }
 
 impl GBData for GBWrite {}
@@ -566,7 +457,7 @@ impl<D: GBData> GBCart<D> {
             GBPin::CS => { if v { self.cs.set_low() } else { self.cs.set_high() } }
             GBPin::RD => { if v { self.rd.set_low() } else { self.rd.set_high() } }
             GBPin::WR => { if v { self.wr.set_low() } else { self.wr.set_high() } }
-            GBPin::CLK => { if v { self.clk.set_low() } else { self.clk.set_high() } }
+            GBPin::_CLK => { if v { self.clk.set_low() } else { self.clk.set_high() } }
             GBPin::RESET => { if v { self.reset.set_low() } else { self.reset.set_high() } }
         }.unwrap()
     }
@@ -576,7 +467,7 @@ enum GBPin {
     CS,
     RD,
     WR,
-    CLK,
+    _CLK,
     RESET,
 }
 
@@ -596,7 +487,7 @@ impl GB {
         self.stats
     }
     fn read_byte(&mut self, addr: u16) -> u8 {
-        let mut cart = self.cart.as_mut().unwrap();
+        let cart = self.cart.as_mut().unwrap();
         cart.set_addr(addr);
         cart.set_pin(GBPin::CS, true);
         delay(5);
@@ -859,10 +750,10 @@ struct GBACart {
 
 enum GBAPin {
     CS,
-    CS2,
+    _CS2,
     RD,
     WR,
-    CLK,
+    _CLK,
 }
 
 impl GBACart {
@@ -896,59 +787,14 @@ impl GBACart {
         }
     }
 
-    // fn set_addr(&mut self, addr: u32) {
-    //     let addr = addr >> 1;
-    //     let mut cart = self.addr.as_mut().unwrap();
-    //     cart.set_addr(addr);
-    // }
-
-    // fn set_data(&mut self, word: u16) {
-    //     let mut cart = self.addr.take().unwrap().to_gba_data_write();
-
-    //     cart.data_0_13.write(word).unwrap();
-    //     if word & (1 << 14) != 0 {
-    //         cart.data_14.set_high()
-    //     } else {
-    //         cart.data_14.set_low()
-    //     }
-    //     .unwrap();
-    //     if word & (1 << 15) != 0 {
-    //         cart.data_15.set_high()
-    //     } else {
-    //         cart.data_15.set_low()
-    //     }
-    //     .unwrap();
-
-    //     self.addr = Some(cart.to_gba_addr());
-    // }
-
-    // fn data(&mut self) -> u16 {
-    //     let mut cart = self.addr.take().unwrap().to_gba_data_read();
-
-    //     let mut data = cart.data_0_13.read().unwrap() & 0b0011_1111_1111_1111;
-    //     data |= if cart.data_14.is_high().unwrap() {
-    //         1 << 14
-    //     } else {
-    //         0
-    //     };
-    //     data |= if cart.data_15.is_high().unwrap() {
-    //         1 << 15
-    //     } else {
-    //         0
-    //     };
-
-    //     self.addr = Some(cart.to_gba_addr());
-    //     data
-    // }
-
     #[rustfmt::skip]
     fn set_pin(&mut self, pin: GBAPin, v: bool) {
         match pin {
             GBAPin::CS => { if v { self.cs.set_low() } else { self.cs.set_high() } }
-            GBAPin::CS2 => { if v { self.cs2.set_low() } else { self.cs2.set_high() } }
+            GBAPin::_CS2 => { if v { self.cs2.set_low() } else { self.cs2.set_high() } }
             GBAPin::RD => { if v { self.rd.set_low() } else { self.rd.set_high() } }
             GBAPin::WR => { if v { self.wr.set_low() } else { self.wr.set_high() } }
-            GBAPin::CLK => { if v { self.clk.set_low() } else { self.clk.set_high() } }
+            GBAPin::_CLK => { if v { self.clk.set_low() } else { self.clk.set_high() } }
         }.unwrap()
     }
 }
@@ -1056,7 +902,7 @@ impl GBA {
         self.unlatch_addr();
         self.cart.addr = Some(data_write.to_gba_addr());
 
-        for i in 0..1_000_000 {
+        for _ in 0..1_000_000 {
             delay(1_000);
             let b = self.read_word(sector);
             if b == 0x80 {
@@ -1078,7 +924,7 @@ impl GBA {
             self.write_word(addr + i as u32, word);
 
             let mut ok = false;
-            for i in 0..1_000_000 {
+            for _ in 0..1_000_000 {
                 delay(1_000);
                 let b = self.read_word(addr);
                 if b == 0x80 {
@@ -1093,57 +939,6 @@ impl GBA {
         self.write_word(addr, 0xff);
         None
     }
-    // fn flash_f3_write(&mut self, addr: u32, buf: &[u8]) -> Option<(u32, u16)> {
-    //     for i in (0..buf.len()).step_by(2) {
-    //         // addr = addr_start + i;
-
-    //         self.latch_addr_fast(addr);
-    //         // _bus_gba_write_word(0xff);
-    //         // _bus_gba_write_word(0x70);
-    //         // unlatch_gba_addr();
-    //         // nop_loop(20);
-
-    //         // bus_gba_write_word_fast(addr, 0xff);
-    //         // bus_gba_write_word_fast(addr, 0x70);
-    //         // while (bus_gba_read_word_fast(addr) != 0x80);
-
-    //         // while (_bus_gba_read_word() != 0x80);
-
-    //         // latch_gba_addr_fast(addr_start);
-    //         let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
-    //         self._write_word(0x00ff, &mut data_write);
-    //         self._write_word(0x0040, &mut data_write);
-    //         self.unlatch_addr();
-    //         self.cart.addr = Some(data_write.to_gba_addr());
-
-    //         let word = u16::from_le_bytes([buf[i], buf[i + 1]]);
-
-    //         //latch_gba_addr_fast(addr);
-    //         self.write_word(addr + i as u32, word);
-    //         //unlatch_gba_addr();
-    //         //nop_loop(20);
-
-    //         self.latch_addr_fast(addr);
-    //         let mut data_read = self.cart.addr.take().unwrap().to_gba_data_read();
-    //         let (mut ok, mut w) = (false, 0);
-    //         for _ in 0..100000 {
-    //             // delay(10);
-    //             w = self._read_word_fast(&mut data_read);
-    //             if w != 0x80 {
-    //                 ok = true;
-    //                 break;
-    //             }
-    //         }
-    //         self.unlatch_addr();
-    //         self.cart.addr = Some(data_read.to_gba_addr());
-    //         // nop_loop(20);
-    //         if !ok {
-    //             return Some((addr + i as u32, w));
-    //         }
-    //     }
-    //     self.write_word(addr, 0xff);
-    //     None
-    // }
     fn flash_write(&mut self, flash_type: FlashType, addr: u32, buf: &[u8]) -> Option<u32> {
         match flash_type {
             FlashType::F3 => self.flash_f3_write(addr, &buf),
@@ -1193,7 +988,7 @@ impl GBA {
             result[i] = (a, b);
             delay(10);
         }
-        for i in 0..1_000_000 {
+        for _ in 0..1_000_000 {
             delay(1_000);
             let b = self.read_word(0);
             if b == 0x80 {
@@ -1201,20 +996,6 @@ impl GBA {
                 break;
             }
         }
-
-        // self.latch_addr_fast(0);
-        // let mut data_write = self.cart.addr.take().unwrap().to_gba_data_write();
-        // self._write_word(0xff, &mut data_write);
-        // self._write_word(0x70, &mut data_write);
-        // self.unlatch_addr();
-        // self.cart.addr = Some(data_write.to_gba_addr());
-
-        // for i in 4..6 {
-        //     let a = self.read_word(0);
-        //     let b = self.read_word(2);
-        //     result[i] = (a, b);
-        //     delay(10);
-        // }
 
         for v in 0..16 {
             self.latch_addr_fast(0);
@@ -1226,7 +1007,7 @@ impl GBA {
 
             self.write_word(v * 2, v as u16);
 
-            for i in 0..1_000_000 {
+            for _ in 0..1_000_000 {
                 delay(1_000);
                 let b = self.read_word(0);
                 if b == 0x80 {
