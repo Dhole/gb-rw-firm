@@ -14,3 +14,34 @@ other microcontroller that implements the
 
 It also uses my [`uRPC` library](https://github.com/Dhole/urpc) (server side)
 to communicate with the host via UART.
+
+## Dependencies
+
+To build the firmware you will need the rust target `thumbv7em-none-eabihf`.  Install it with:
+```
+rustup target add thumbv7em-none-eabihf
+```
+
+To flash the firmware you will need openocd.
+
+Debian install:
+```
+sudo apt install openocd
+```
+
+Arch install:
+```
+sudo pacman -S openocd
+```
+
+## Build and flash
+
+To build the firmware:
+```
+cargo build --release
+```
+
+To flash the firmware:
+```
+./flash.sh
+```
