@@ -55,7 +55,9 @@ impl GBStats {
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub enum FlashType {
-    F3 = 3,
+    Generic = 0,
+    F3 = 1,
+    Bf53 = 2,
 }
 
 server_requests! {
@@ -66,7 +68,7 @@ server_requests! {
     (3, gb_write_word, GBWriteWord((u16, u8), OptBufNo, (), OptBufNo)),
     (4, gb_write, GBWrite(u16, OptBufYes, (), OptBufNo)),
     // (5, gb_flash_erase, GBFlashErase((), OptBufNo, (), OptBufNo)),
-    (6, gb_flash_write, GBFlashWrite(u16, OptBufYes, Option<(u16, u8)>, OptBufNo)),
+    (6, gb_flash_write, GBFlashWrite((FlashType, u16), OptBufYes, Option<(u16, u8)>, OptBufNo)),
     (7, gb_flash_erase_sector, GBFlashEraseSector(u16, OptBufNo, bool, OptBufNo)),
     (8, gb_flash_info, GBFlashInfo((), OptBufNo, (u8, u8), OptBufNo)),
     (9, gb_get_stats, GBGetStats((), OptBufNo, Option<GBStats>, OptBufNo)),
@@ -115,6 +117,7 @@ fn main() -> ! {
 
     let mut serial = Serial::new(rx, tx);
 
+    delay(96_000_000 / 4);
     serial.write_all(b"\nHELLO\n").ok();
 
     let mut mode = Mode::GB(GB::new(Resources {
@@ -199,8 +202,8 @@ fn main() -> ! {
                     }
                     ServerRequest::GBFlashWrite((req, buf)) => {
                         if let Mode::GB(ref mut gb) = mode {
-                            let addr = req.body;
-                            let fail = gb.flash_write(addr, buf);
+                            let (flash_type, addr) = req.body;
+                            let fail = gb.flash_write(flash_type, addr, buf);
                             req.reply(fail, &mut tx_buf).unwrap()
                         } else {
                             req.reply(None, &mut tx_buf).unwrap()
@@ -537,8 +540,8 @@ impl GB {
             self.write_byte(addr + i as u16, *byte);
         }
     }
-    // Returns Self, success, last byte read
-    fn flash_write_byte(&mut self, addr: u16, byte: u8) -> (bool, u8) {
+    // Returns Self, success, last byte read.  Generic Flash.
+    fn flash_gene_write_byte(&mut self, addr: u16, byte: u8) -> (bool, u8) {
         self.write_byte(0x0AAA, 0xA9);
         self.write_byte(0x0555, 0x56);
         self.write_byte(0x0AAA, 0xA0);
@@ -558,6 +561,30 @@ impl GB {
                 ok = true;
                 break;
             } else if b0 & (1 << 5) != 0 {
+                self.stats.flash_write_errors += 1;
+                break;
+            }
+        }
+        (ok, b1)
+    }
+    // Returns Self, success, last byte read
+    fn flash_bf53_write_byte(&mut self, addr: u16, byte: u8) -> (bool, u8) {
+        self.write_byte(0x0AAA, 0xA9);
+        self.write_byte(0x0555, 0x56);
+        self.write_byte(0x0AAA, 0xA0);
+        self.write_byte(addr, byte);
+        let (mut ok, mut b1) = (false, 0);
+        for _ in 0..50 {
+            delay(10);
+            let b0 = self.read_byte(addr);
+            delay(5);
+            b1 = self.read_byte(addr);
+            if b0 & (1 << 7) == b1 & (1 << 7) {
+                self.write_byte(0x0000, 0xFF); // reset
+                b1 = self.read_byte(addr);
+                ok = true;
+                break;
+            } else if b0 & (1 << 6) != 0 {
                 self.stats.flash_write_errors += 1;
                 break;
             }
@@ -591,15 +618,20 @@ impl GB {
         self.write_byte(0x0AAA, 0x90);
         let manufacturer_id = self.read_byte(0x0000);
         let device_id = self.read_byte(0x0002);
-        self.write_byte(0x0000, 0xFF); // reset
+        self.write_byte(0x0000, 0xFF); // reset generic
+        self.write_byte(0x0000, 0xF0); // reset bf53
         (manufacturer_id, device_id)
     }
-    fn flash_write(&mut self, addr: u16, bytes: &[u8]) -> Option<(u16, u8)> {
+    fn flash_write(&mut self, flash_type: FlashType, addr: u16, bytes: &[u8]) -> Option<(u16, u8)> {
         let mut fail = None;
         const RETRIES: usize = 4;
         for (i, byte) in bytes.iter().enumerate() {
             for _ in 0..RETRIES {
-                let (ok, b) = self.flash_write_byte(addr + i as u16, *byte);
+                let (ok, b) = match flash_type {
+                    FlashType::Generic => self.flash_gene_write_byte(addr + i as u16, *byte),
+                    FlashType::Bf53 => self.flash_bf53_write_byte(addr + i as u16, *byte),
+                    _ => return Some((0x1234, 0x00)),
+                };
                 fail = Some((addr + i as u16, b));
                 if !ok {
                     break;
@@ -942,16 +974,19 @@ impl GBA {
     fn flash_write(&mut self, flash_type: FlashType, addr: u32, buf: &[u8]) -> Option<u32> {
         match flash_type {
             FlashType::F3 => self.flash_f3_write(addr, &buf),
+            _ => Some(0x123456),
         }
     }
     fn flash_unlock_sector(&mut self, flash_type: FlashType, sector: u32) -> bool {
         match flash_type {
             FlashType::F3 => self.flash_f3_unlock_sector(sector),
+            _ => false,
         }
     }
     fn flash_erase_sector(&mut self, flash_type: FlashType, sector: u32) -> bool {
         match flash_type {
             FlashType::F3 => self.flash_f3_erase_sector(sector),
+            _ => false,
         }
     }
     // test1: Unlock sector
